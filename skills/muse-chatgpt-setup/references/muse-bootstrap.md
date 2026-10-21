@@ -1,61 +1,67 @@
-# Muse bootstrap — paste-ready messages
+# Paste-ready messages
 
-Two messages total. Replace `TUNNEL_ID` before sending. Never include a key in either.
+Three messages total. Replace `TUNNEL_ID` before sending. **No key ever appears in message text** — it travels as a file attachment only.
+
+These assume the target VM is a **fresh machine**: no tunnel client, no MCP server, no systemd units, no previous run. The repo ships everything needed, so nobody has to improvise code on the fly.
 
 ---
 
-## Message 1 — build everything (send right after the tunnel exists)
+## Message 1 — install (send right after the tunnel exists)
 
-> 帮我在你自己的 VM 上建立到 ChatGPT 的隧道，独立配置，不要改动任何现有服务。Tunnel ID：`TUNNEL_ID`。
+> 帮我在这台机器上装一条到 ChatGPT 的连接。**假设这台机器什么都没有**（没有 tunnel-client、没有 MCP 服务、没有任何相关服务），一切从零装，只装在我自己的目录里。
 >
-> 请一次做完，不要逐步问我：
-> 1. 下载官方 tunnel-client（v0.0.11 linux-amd64）到 `~/muse-chatgpt-tunnel/bin/`，报版本。
-> 2. 写一个最小 MCP 服务（Streamable HTTP，`/mcp`），工具只要 `muse_ping` 和 `muse_vm_exec`；`muse_vm_exec` 只允许一个白名单命令 `status_echo`（固定 argv，无 shell），返回 hostname、UTC 时间和调用方传入的 echo_token。**工具描述只写事实**（跑什么、返回什么），不要写"无害""不是 agent 对话"这类自我评定的措辞。
-> 3. 建两个 systemd 服务：`muse-mcp.service`（`127.0.0.1:MCP_PORT`）和 `muse-chatgpt-tunnel.service`（健康口 `127.0.0.1:HEALTH_PORT`，`--mcp.server-url url=http://127.0.0.1:MCP_PORT/mcp`）。api-key 只用 `--control-plane.api-key env:CONTROL_PLANE_API_KEY`，密钥不在聊天里，稍后我用附件给你，先留空。
-> 4. **启动顺序**：先起 mcp、等端口可连，再起 tunnel，避免 discovery 早于端口绑定。以后改代码时**重启顺序也是先 mcp 再 tunnel**，这条写进 `restore.sh` 注释和 `README.md`。
-> 5. unit 正本放 `~/muse-chatgpt-tunnel/systemd/`，写 `restore.sh` 一键装回（VM 换机会清掉 `/etc`）。日志一律带 UTC ISO 时间戳。
-> 6. 遇到出网审批（`Access api.openai.com`）就告诉我，我会选 Always allow。
+> Tunnel ID：`TUNNEL_ID`
 >
-> 回报：版本、端口、两个服务的 PID、`health` 的 result 行。
+> 执行这三条，不要改脚本内容、不要自己重写实现：
+>
+> ```bash
+> mkdir -p ~/muse-chatgpt && cd ~/muse-chatgpt
+> curl -fsSL https://raw.githubusercontent.com/elaeuk-wq/muse-chatgpt-setup-skill/main/skills/muse-chatgpt-setup/scripts/install.sh -o install.sh
+> curl -fsSL https://raw.githubusercontent.com/elaeuk-wq/muse-chatgpt-setup-skill/main/skills/muse-chatgpt-setup/scripts/muse-mcp.py -o muse-mcp.py
+> TUNNEL_ID=TUNNEL_ID KEY_FILE=~/run/control-plane.env bash install.sh
+> ```
+>
+> 说明：
+> - `install.sh` 会自己下载官方 tunnel-client、自动挑空闲端口、写两个 systemd 服务（没有 systemd 时退回 nohup）、生成 `restore.sh`。
+> - 密钥文件 `~/run/control-plane.env` 我稍后单独给你（**不在聊天里发**），内容一行 `CONTROL_PLANE_API_KEY=...`。没有它就先别跑，等我。
+> - 启动顺序脚本里已处理：先 MCP、等端口可连、再 tunnel。别自己改顺序。
+> - 日志带 UTC 时间戳，输出在 `journalctl -u muse-mcp -u muse-tunnel` 或 `~/muse-chatgpt/logs/`。
+>
+> 装完只回报：脚本最后的 report 段、两个服务的状态、`curl -fsS 127.0.0.1:<health>/readyz` 的结果。不要输出任何密钥。
 
 ---
 
-## Message 2 — key handoff (attach the env file, do not type the key)
+## Message 2 — key handoff (attach the env file with this message)
 
-> 附件 `control-plane.env` 是受限 Key（Tunnels Read+Use，30 天）。请：
-> 1. 覆盖 `~/muse-chatgpt-tunnel/run/control-plane.env`，权限 0600。
-> 2. 对附件做零覆写后删除，确认 `~/workspace` 下无副本。
-> 3. 按正确顺序重启（mcp → 等端口 → tunnel），贴 `mcp session initialized` 行与 `health` result 行。
-> 4. 自测一次 `muse_vm_exec`（cmd=status_echo，echo_token=selftest-01），贴返回。
-> 5. 只回报 Key 的 SHA256 前 8 位，不要回显完整值。
-
----
-
-## Message 3 — when something breaks (diagnosis, not guessing)
-
-> 只回报事实与日志，不要改配置：
-> 1. `systemctl is-active muse-mcp muse-chatgpt-tunnel` 与两者 PID、启动时间。
-> 2. `tunnel.log` 最近 10 分钟：有没有 `dispatcher forwarded`？有没有 `unexpected EOF` / `proxyconnect`？
-> 3. `mcp.log` 同窗口的 `POST /mcp` 行。
-> 4. `tunnel-client health --require-control-plane-poll` 的 result 行。
-> 5. 当前 boot 时间（`uptime -s`）——用于判断是不是又换机了。
+> 附件是受限 Key（Tunnels Read+Use，30 天）。请：
+> 1. 把它保存为 `~/run/control-plane.env`（0600）。
+> 2. 跑 `bash ~/muse-chatgpt/restore.sh` 让两个服务按正确顺序起来。
+> 3. 回报 `readyz` 结果与服务 PID；只贴 Key 的 SHA256 前 8 位，不回显完整值。
+> 4. 对该附件做零覆写后删除。
 
 ---
 
-## Notes for the operator
+## Message 3 — diagnosis (only when something is wrong)
 
-- Approval cards appear per connector and per change. **Always allow** for `openai.com` is what keeps the tunnel alive; the per-tool approval is the user's call.
-- `刷新工具` does not force re-discovery. New tool or new description → **new connector**.
-- Keep names unique (`Muse Native`, then `…2`, `…3`) and uninstall the stale one afterwards.
+> 只回报事实，不要改配置：
+> 1. `systemctl is-active muse-mcp muse-tunnel` + 各自 PID 与启动时间（没有 systemd 就报 `ps` 与 pid 文件）。
+> 2. `journalctl -u muse-tunnel --since "-10 min"` 里有没有 `dispatcher forwarded`？有没有 `unexpected EOF` / `proxyconnect`？
+> 3. `journalctl -u muse-mcp --since "-10 min"` 里的请求行。
+> 4. `curl -fsS 127.0.0.1:<health>/readyz` 与 `/healthz` 的结果。
+> 5. 如果这台机器换过机（`uptime -s` 很新），直接说，别猜。
 
 ---
 
-## Approvals: where they are, what to click
+## Approvals
 
-The run looks stuck because it **is** waiting. Cards live in the right sidebar under **需要审核** (and an **审核** button sits above the composer) — often *not* in the chat transcript.
+The run looks stuck because it **is** waiting. Cards live in the right sidebar under **需要审核** (and an **审核** button above the composer), often *not* in the chat transcript.
 
-- For any network/egress card (`允许 <agent> 与 api.openai.com 分享信息`): do **not** use 允许一次. Click the caret **更多允许选项** beside it → **总是允许此站点**. A one-shot approval survives exactly one poll, then the tunnel stalls again.
-- For the connector consent in ChatGPT: **连接 <name>** must be clicked, or `tools/list` returns `[]`.
-- If the agent has produced nothing for ~30 s, check for a pending card before concluding anything is broken.
+**The host AI should click these itself** (SKILL.md §0.6):
 
-**The host AI should click these itself** (see SKILL.md §0.6) — 更多允许选项 → 总是允许此站点, and 连接 <name> for the connector. Only login / MFA / payment / scope expansion are reserved for the user. Silently waiting, or asking the user to hunt for a sidebar button, is the failure mode this section exists to prevent.
+- Egress / background task: `允许一次` is a split button → caret **更多允许选项** → **总是允许此站点**
+- ChatGPT connector consent: **连接 <name>**
+- ChatGPT per-tool card: **始终允许**
+
+Never click login / MFA / CAPTCHA / payment / scope expansion — stop and ask.
+
+Verify after clicking: the pending badge disappears and **审核记录** gains `始终允许网站`.

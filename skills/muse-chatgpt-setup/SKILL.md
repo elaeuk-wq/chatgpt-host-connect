@@ -82,16 +82,21 @@ Everything here is **per account**: tunnels and connectors are scoped to whichev
    - Restricted keys are **org-scoped**: re-runs in the same org may reuse one key for several tunnels, but a different OpenAI account/organization needs its own key (and its own tunnel).
 5. If the Create button stays disabled, the **expiry** field is unfilled — that is the usual cause.
 
-## 2. Muse: one-shot bootstrap
+## 2. Target machine: install from zero
 
-Paste the block in `references/muse-bootstrap.md`, substituting `TUNNEL_ID`. It covers: download the official client, write the key via stdin to a `0600` env file, two systemd units, a `restore.sh` for VM swaps, correct start order, timestamped logs, one whitelisted exec tool with **neutral** wording, and a `health` self-test.
+**Assume the machine is brand new**: no tunnel client, no MCP server, no units, no previous run. Do not ask the remote agent to write infrastructure from scratch — the repo ships it, so every user gets the same bytes:
 
-Rules that make it fast and safe:
+- `scripts/install.sh` — downloads the official `tunnel-client`, picks free ports, writes two units (systemd, or a `nohup` fallback), generates `restore.sh`, starts in the correct order, prints a report.
+- `scripts/muse-mcp.py` — a stdlib-only MCP server: `muse_ping` + `muse_vm_exec` (one whitelisted command, fixed argv, no shell), neutral tool descriptions, timestamped logs.
 
-- **`--control-plane.api-key env:CONTROL_PLANE_API_KEY`** only. Never on the command line, never in logs.
-- Delivery of the key: a **file attachment** is the only workable channel on this platform (see Limits). Attach a file containing just the env line; ask Muse to overwrite its env file, zero-overwrite and delete the attachment, then restart and self-test. Chat prose must never contain the key.
-- Expect **egress approval cards** (`Access api.openai.com`). The tunnel polls continuously: choose **Always allow**. One-shot approval works exactly once, then dead.
-- Ask for the self-test payload to include hostname, live UTC and the caller token — that is your B-level evidence later.
+Send `references/muse-bootstrap.md` **Message 1** (it fetches both files from this repo and runs one command). The only local prerequisites are `curl` and `python3`.
+
+Rules:
+
+- **`--control-plane.api-key env:CONTROL_PLANE_API_KEY`** only; the key lives in a `0600` file that the unit sources. Never on a command line, never in a log, never in chat prose.
+- Key delivery: a **file attachment** (see Limits), saved to `~/run/control-plane.env`, attachment zero-overwritten afterwards.
+- Ports are auto-picked, so an existing service on 8795/8796 cannot collide. Nothing outside `~/muse-chatgpt` and the two units this script creates is touched.
+- The self-test payload must return hostname, a fresh timestamp and the caller token — that is the B-level evidence.
 
 ## 3. ChatGPT: connector
 
@@ -107,7 +112,6 @@ Rules that make it fast and safe:
 
 1. New chat, ask the model to call the exec tool with a **one-time random token** and to paste the raw JSON unchanged.
 2. Accept only: token echoed verbatim + a second call returning a **different** timestamp, **and** in the VM logs a `dispatcher forwarded … command` line whose `tunnel_id` matches, plus one MCP request line in the same second.
-   - **Do not compare timestamps against your own clock.** Cloud VMs can be off by many hours (an 18-hour skew was observed on a healthy VM). Freshness = the payload timestamp agrees with the VM's *own* log timestamp for that call, not with the operator's machine.
    - Logs may be in **journald** rather than files: ask for `journalctl -u <unit> --since ...`. Do not conclude "no logs" because `tunnel.log` is absent.
    - Read the tool schema instead of assuming parameter names: one implementation used `cmd`, another `command`, and payload shapes differed too.
 3. **Read the `tunnel_id` in the forwarded line.** With more than one tunnel alive it is the only proof of *which* path served the call — the assistant's own claim about which connector it used is not evidence.
@@ -127,7 +131,6 @@ Rules that make it fast and safe:
 | Suspicious-instruction warning | tool description argues it is harmless | reword to facts only, then new connector |
 | Tool discovery returns `[]` / "tool does not exist" on a brand-new connector | consent dialog never confirmed — *已安装* ≠ *已连接* | open the app page → **连接** → **连接 <name>** |
 | New tunnel missing from the connector's tunnel chips | tunnel not associated with the ChatGPT workspace | **Edit tunnel → ChatGPT workspaces → Save**, re-check the chips |
-| Timestamp proof "fails" against your clock | remote VM clock skew (18 h seen on a healthy VM) | compare payload time with the VM's own log line, not yours |
 | "No logs at all" | service logs to journald, not to a file | `journalctl -u <unit> --since "-10 min"` |
 | Agent stalls with no output | an approval card is waiting in the sidebar | open **需要审核**; for egress use 更多允许选项 → 总是允许此站点 |
 | Tunnel stalls again an hour later | egress approval was one-shot, not always-allow | re-approve with 总是允许此站点 |

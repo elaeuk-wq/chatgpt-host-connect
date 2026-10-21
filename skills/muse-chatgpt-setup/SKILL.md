@@ -30,6 +30,20 @@ Send Muse **one** message asking all of this at once, so you never pay for a sec
 
 If ② is "no", that is expected — the bootstrap creates one. Only ①③⑤ can actually block you.
 
+## 0.5 Approval gates — where they hide (the #1 reason a run appears "stuck")
+
+Nothing in this flow fails silently: it **waits**. If the remote agent stops producing output for ~30 s, the cause is almost always an unclicked approval, not a technical failure. Never sit and wait — go look, then tell the user exactly which button to press.
+
+| Gate | Where it appears | What to choose |
+|---|---|---|
+| Muse background task needs review | Right-hand sidebar **需要审核**, and a **审核** button above the composer | Open the card. For network access pick the long-lived option |
+| Egress proxy → `api.openai.com` | Same sidebar card: *允许 <agent> 与 api.openai.com 分享信息* | **允许一次 is not enough.** Click **更多允许选项** (the caret right of 允许一次) → **总是允许此站点**. The tunnel polls forever; a one-shot approval lets exactly one poll through and then stalls |
+| ChatGPT tool call | Inline card in the conversation | User's call; 「始终允许」 avoids a click per call |
+| ChatGPT connector consent | Consent screen after *创建为插件* | **连接 <name>** — without it `tools/list` returns `[]` |
+| Platform tunnel/key creation | No card | Requires being signed in with permission to create |
+
+The approval card is frequently **not** in the chat transcript — it lives in the sidebar panel, so a public-facing run must point at it explicitly (or click it once the user has pre-authorised). One observed stall lasted until the user manually clicked the card; the agent had been reporting "waiting" with no hint of what to click. Do not repeat that: name the panel, name the button.
+
 ## 1. Platform: tunnel + restricted key
 
 1. https://platform.openai.com/settings/organization/tunnels → **Create tunnel**. Name it after the purpose (e.g. `muse-chatgpt-native`), pick the org, and select the user's ChatGPT workspace. Copy the `tunnel_…` id — it is not a secret.
@@ -90,6 +104,8 @@ Rules that make it fast and safe:
 | New tunnel missing from the connector's tunnel chips | tunnel not associated with the ChatGPT workspace | **Edit tunnel → ChatGPT workspaces → Save**, re-check the chips |
 | Timestamp proof "fails" against your clock | remote VM clock skew (18 h seen on a healthy VM) | compare payload time with the VM's own log line, not yours |
 | "No logs at all" | service logs to journald, not to a file | `journalctl -u <unit> --since "-10 min"` |
+| Agent stalls with no output | an approval card is waiting in the sidebar | open **需要审核**; for egress use 更多允许选项 → 总是允许此站点 |
+| Tunnel stalls again an hour later | egress approval was one-shot, not always-allow | re-approve with 总是允许此站点 |
 | PASS claimed but the old tunnel served the call | two connectors, identical tool names | uninstall the stale one; confirm `tunnel_id` in the forwarded log line |
 | Poll fails, VM network fine | egress proxy stalls `Authorization` requests until approved | approve with **Always allow** |
 

@@ -47,3 +47,15 @@ Two messages total. Replace `TUNNEL_ID` before sending. Never include a key in e
 - Approval cards appear per connector and per change. **Always allow** for `openai.com` is what keeps the tunnel alive; the per-tool approval is the user's call.
 - `刷新工具` does not force re-discovery. New tool or new description → **new connector**.
 - Keep names unique (`Muse Native`, then `…2`, `…3`) and uninstall the stale one afterwards.
+
+---
+
+## Approvals: where they are, what to click
+
+The run looks stuck because it **is** waiting. Cards live in the right sidebar under **需要审核** (and an **审核** button sits above the composer) — often *not* in the chat transcript.
+
+- For any network/egress card (`允许 <agent> 与 api.openai.com 分享信息`): do **not** use 允许一次. Click the caret **更多允许选项** beside it → **总是允许此站点**. A one-shot approval survives exactly one poll, then the tunnel stalls again.
+- For the connector consent in ChatGPT: **连接 <name>** must be clicked, or `tools/list` returns `[]`.
+- If the agent has produced nothing for ~30 s, check for a pending card before concluding anything is broken.
+
+When the host AI runs this skill for someone else, it must say which panel and which button — silently waiting is the failure mode this section exists to prevent.

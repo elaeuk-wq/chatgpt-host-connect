@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Offline stand-in for openai/tunnel-client, used by tests/test-install.sh.
+
+Implements just enough of `tunnel-client run` to exercise install.sh:
+  --version, run --control-plane.tunnel-id --control-plane.api-key env:VAR
+  --mcp.server-url url=... --health.listen-addr host:port --pid.file path
+Serves /healthz, /readyz and /metrics (commands_poll_last_successful_timestamp_seconds)
+like the real client. Behaviour is chosen by the key value:
+  *good*    first poll succeeds after ~1s; NO "poller recovered" line (real behaviour)
+  *flaky*   two failed polls, then success + "poller recovered; polling operational"
+  *bad*     every poll fails with status_code=401 invalid_api_key
+  *pending* every poll times out (egress not approved)
+Logs a short sha256 fingerprint of the key so tests can confirm rotation.
+"""
+import hashlib
+import os
+import signal
+import sys
+import threading
+import time
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+if "--version" in sys.argv or "-v" in sys.argv:
+    print("0.0.0-mock")
+    sys.exit(0)
+if len(sys.argv) < 2 or sys.argv[1] != "run":
+    print("mock supports only: --version, run", file=sys.stderr)
+    sys.exit(1)
+
+
+def flag(name):
+    args = sys.argv[2:]
+    for i, a in enumerate(args):
+        if a == name and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith(name + "="):
+            return a.split("=", 1)[1]
+    return None
+
+
+def log(level, msg, **kv):
+    ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    extra = " ".join("%s=%s" % (k, v) for k, v in kv.items())
+    print("time=%s level=%s msg=%r %s" % (ts, level, msg, extra), flush=True)
+
+
+ref = flag("--control-plane.api-key") or ""
+if not ref.startswith("env:"):
+    log("ERROR", "api key reference must be env:VAR in this mock")
+    sys.exit(1)
+key = os.environ.get(ref[4:], "")
+if not key:
+    log("ERROR", "environment variable is empty", var=ref[4:])
+    sys.exit(1)
+tunnel_id = flag("--control-plane.tunnel-id")
+host, port = (flag("--health.listen-addr") or "127.0.0.1:8080").rsplit(":", 1)
+pid_file = flag("--pid.file")
+if pid_file:
+    with open(pid_file, "w") as f:
+        f.write(str(os.getpid()))
+
+state = {"last_success": 0}
+
+
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/metrics":
+            body = ("# HELP commands_poll_last_successful_timestamp_seconds last poll\n"
+                    "# TYPE commands_poll_last_successful_timestamp_seconds gauge\n"
+                    'commands_poll_last_successful_timestamp_seconds{otel_scope_name="controlplane"} %d\n'
+                    % state["last_success"])
+        elif self.path in ("/healthz", "/readyz"):
+            body = "ok\n"
+        else:
+            self.send_response(404); self.end_headers(); return
+        raw = body.encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, *a):
+        pass
+
+
+srv = ThreadingHTTPServer((host, int(port)), H)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+log("INFO", "tunnel client started", tunnel_id=tunnel_id,
+    key_fp=hashlib.sha256(key.encode()).hexdigest()[:8])
+
+failures = 0
+while True:
+    time.sleep(1)
+    if "bad" in key:
+        log("WARN", "poll failed; backing off", status_code=401, error_code="invalid_api_key")
+        continue
+    if "pending" in key:
+        log("WARN", "poll timed out; backing off", poll_timeout_ms=30000)
+        continue
+    if "flaky" in key and failures < 2:
+        failures += 1
+        log("WARN", "poll timed out; backing off", poll_timeout_ms=30000)
+        continue
+    if state["last_success"] == 0 and failures:
+        log("INFO", "poller recovered; polling operational")
+    state["last_success"] = int(time.time())

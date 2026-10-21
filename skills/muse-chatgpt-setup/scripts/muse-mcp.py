@@ -129,6 +129,9 @@ def handle_rpc(body, session_id):
             "serverInfo": {"name": NAME, "version": VERSION},
         }), None, 200
 
+    if method == "ping":
+        return rpc_result(rid, {}), None, 200
+
     if method == "tools/list":
         log("rpc method=tools/list")
         return rpc_result(rid, {"tools": TOOLS}), None, 200
@@ -165,13 +168,24 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(raw)
 
     def do_GET(self):  # health / liveness
-        if self.path.rstrip("/") in ("", "/healthz", "/readyz"):
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if path == "/mcp":
+            # Streamable HTTP: this server offers no server-initiated SSE stream.
+            # 405 (not 404) tells clients the session is fine, just no GET stream.
+            self._send(405, {"error": "method not allowed"}, {"Allow": "POST"})
+        elif path in ("", "/healthz", "/readyz"):
             self._send(200, {"status": "ok", "server": NAME, "version": VERSION, "utc": now()})
         else:
             self._send(404, {"error": "not found"})
 
+    def do_DELETE(self):  # no session teardown to do
+        if self.path.split("?", 1)[0].rstrip("/") == "/mcp":
+            self._send(405, {"error": "method not allowed"}, {"Allow": "POST"})
+        else:
+            self._send(404, {"error": "not found"})
+
     def do_POST(self):
-        if self.path.rstrip("/") != "/mcp":
+        if self.path.split("?", 1)[0].rstrip("/") != "/mcp":
             self._send(404, {"error": "not found"})
             return
         try:
@@ -187,7 +201,10 @@ class Handler(BaseHTTPRequestHandler):
                 res, _, code = handle_rpc(item, self.server.session_id)
                 if res is not None:
                     out.append(res)
-            self._send(200, out)
+            if out:
+                self._send(200, out)
+            else:
+                self._send(202)
             return
 
         res, _, code = handle_rpc(body, self.server.session_id)
@@ -200,6 +217,10 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     server.session_id = uuid.uuid4().hex
+    pid_file = os.environ.get("MCP_PID_FILE")
+    if pid_file:
+        with open(pid_file, "w") as f:
+            f.write(str(os.getpid()))
     log("%s %s listening on http://%s:%d/mcp" % (NAME, VERSION, HOST, PORT))
     try:
         server.serve_forever()

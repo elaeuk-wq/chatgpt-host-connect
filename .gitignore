@@ -2,9 +2,17 @@
 .env
 *.env
 !.env.example
-*key*
-!*keyword*
+*.key
+*-key.txt
+control-plane*.txt
 secrets/
 run/
 tunnel.pid
 *.log
+
+# python
+__pycache__/
+*.pyc
+
+# local state of the browser driver
+.muse-chatgpt-setup/

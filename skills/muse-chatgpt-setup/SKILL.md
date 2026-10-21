@@ -167,6 +167,8 @@ If PENDING: the approval card is waiting (sidebar **需要审核**). Click **更
 | `/healthz` and `/readyz` both green, yet nothing works | those endpoints are **local only**; the control-plane poll can still be timing out | look for `poller recovered` / a successful poll in the tunnel log before believing it |
 | ChatGPT says *应用配置受到速率限制* | in practice this fired while the tunnel was **not** connected | confirm the tunnel polls successfully, then retry creation |
 | Connector is missing from *已安装* although you clicked create | the consent step never completed (or creation was rejected) | re-create once the tunnel is up, click **连接 <name>**, then confirm it is listed |
+| Tool card appears only *after* the answer starts streaming | the pump stopped too early | keep polling until the answer text is on screen, not for a fixed duration |
+| A second install into the same directory silently repointed the old connector | one install dir = one live tunnel binding | after re-installing, uninstall the previous connector and delete its tunnel/key |
 | Tunnel stalls again an hour later | egress approval was one-shot, not always-allow | re-approve with 总是允许此站点 |
 | PASS claimed but the old tunnel served the call | two connectors, identical tool names | uninstall the stale one; confirm `tunnel_id` in the forwarded log line |
 | Poll fails, VM network fine | egress proxy stalls `Authorization` requests until approved | approve with **Always allow** |

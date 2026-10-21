@@ -34,12 +34,14 @@ If ② is "no", that is expected — the bootstrap creates one. Only ①③⑤ c
 
 1. https://platform.openai.com/settings/organization/tunnels → **Create tunnel**. Name it after the purpose (e.g. `muse-chatgpt-native`), pick the org, and select the user's ChatGPT workspace. Copy the `tunnel_…` id — it is not a secret.
 2. Never reuse a tunnel that already carries another service; if one exists (`aws`, etc.) leave it alone.
-3. https://platform.openai.com/settings/organization/api-keys → **Create new secret key**:
+3. **The tunnel must be associated with the target ChatGPT workspace**, or it will not appear at all in step 3. The Create dialog's workspace field is easy to miss and its markup differs per organization — if the dialog shows no `Search workspaces by name or ID` control, create anyway and then **Edit tunnel → ChatGPT workspaces → pick the workspace → Save**. Verify success by re-opening the connector dialog and confirming the tunnel name shows up as a chip; a tunnel that is org-scoped but workspace-less is invisible there and every later step is wasted.
+4. https://platform.openai.com/settings/organization/api-keys → **Create new secret key**:
    - Name it distinctly (`…-runtime-2` on re-runs).
    - Permissions → **Restricted** → set **Tunnels = Read + Use**, nothing else.
    - Expiry → 30 days (avoid "never").
    - The key is shown **once**, in a readonly `<input>` inside a *Save your key* dialog. Read it from the DOM into a local `0600` file **inside the same script**; never print it, never paste it into a chat message.
-4. If the Create button stays disabled, the **expiry** field is unfilled — that is the usual cause.
+   - Restricted keys are **org-scoped**: re-runs in the same org may reuse one key for several tunnels, but a different OpenAI account/organization needs its own key (and its own tunnel).
+5. If the Create button stays disabled, the **expiry** field is unfilled — that is the usual cause.
 
 ## 2. Muse: one-shot bootstrap
 
@@ -65,7 +67,10 @@ Rules that make it fast and safe:
 ## 4. Prove it (two-sided, or it didn't happen)
 
 1. New chat, ask the model to call the exec tool with a **one-time random token** and to paste the raw JSON unchanged.
-2. Accept only: token echoed verbatim + fresh UTC + `hostname`, **and** in the VM logs, exactly one `dispatcher forwarded … command` in `tunnel.log` plus exactly one `POST /mcp 200` in the MCP log in the same seconds, matching the payload timestamp to the millisecond.
+2. Accept only: token echoed verbatim + a second call returning a **different** timestamp, **and** in the VM logs a `dispatcher forwarded … command` line whose `tunnel_id` matches, plus one MCP request line in the same second.
+   - **Do not compare timestamps against your own clock.** Cloud VMs can be off by many hours (an 18-hour skew was observed on a healthy VM). Freshness = the payload timestamp agrees with the VM's *own* log timestamp for that call, not with the operator's machine.
+   - Logs may be in **journald** rather than files: ask for `journalctl -u <unit> --since ...`. Do not conclude "no logs" because `tunnel.log` is absent.
+   - Read the tool schema instead of assuming parameter names: one implementation used `cmd`, another `command`, and payload shapes differed too.
 3. **Read the `tunnel_id` in the forwarded line.** With more than one tunnel alive it is the only proof of *which* path served the call — the assistant's own claim about which connector it used is not evidence.
 3. Second call must return a *different* UTC — proves it is not a constant.
 4. Rotate any key that ever appeared in plaintext, then re-run step 4 once with the new key. Revoke the old one only after the new call passes.
@@ -82,6 +87,9 @@ Rules that make it fast and safe:
 | Every call prompts for approval | per-connector permission is one-shot | user picks **Always allow** |
 | Suspicious-instruction warning | tool description argues it is harmless | reword to facts only, then new connector |
 | Tool discovery returns `[]` / "tool does not exist" on a brand-new connector | consent dialog never confirmed — *已安装* ≠ *已连接* | open the app page → **连接** → **连接 <name>** |
+| New tunnel missing from the connector's tunnel chips | tunnel not associated with the ChatGPT workspace | **Edit tunnel → ChatGPT workspaces → Save**, re-check the chips |
+| Timestamp proof "fails" against your clock | remote VM clock skew (18 h seen on a healthy VM) | compare payload time with the VM's own log line, not yours |
+| "No logs at all" | service logs to journald, not to a file | `journalctl -u <unit> --since "-10 min"` |
 | PASS claimed but the old tunnel served the call | two connectors, identical tool names | uninstall the stale one; confirm `tunnel_id` in the forwarded log line |
 | Poll fails, VM network fine | egress proxy stalls `Authorization` requests until approved | approve with **Always allow** |
 

@@ -178,15 +178,16 @@ if [ "${NO_SYSTEMD:-0}" != "1" ] && [ "$(id -u)" = "0" ] && [ -d /etc/systemd/sy
   systemctl restart "$UNIT_TUN"
   USE_SYSTEMD=1
 else
-  ( cd "$DIR" && nohup python3 muse-mcp.py >> logs/mcp.log 2>&1 & echo $! > run/mcp.pid )
+  ( cd "$DIR" && set -a && . "$DIR/run/service.env" && set +a && exec nohup python3 muse-mcp.py >> logs/mcp.log 2>&1 ) &
+  echo $! > "$DIR/run/mcp.pid"
   wait_port "$MCP_PORT" || say "WARN: mcp port not accepting yet"
-  ( cd "$DIR" && set -a && . run/control-plane.env && set +a && \
-    nohup ./bin/tunnel-client run \
+  ( cd "$DIR" && set -a && . run/control-plane.env && set +a && exec nohup ./bin/tunnel-client run \
       --control-plane.tunnel-id "$TUNNEL_ID" \
       --control-plane.api-key env:CONTROL_PLANE_API_KEY \
       --mcp.server-url "url=http://127.0.0.1:$MCP_PORT/mcp" \
       --health.listen-addr "127.0.0.1:$HEALTH_PORT" \
-      --pid.file run/tunnel.pid >> logs/tunnel.log 2>&1 & echo $! > run/tunnel.pid )
+      --pid.file "$DIR/run/tunnel.pid" >> logs/tunnel.log 2>&1 ) &
+  echo $! > "$DIR/run/tunnel.pid.nohup"
 fi
 
 # ---------- verify ----------
@@ -206,8 +207,8 @@ cat <<EOF
 ---------------- report ----------------
 dir            : $DIR
 mode           : $([ "$USE_SYSTEMD" = 1 ] && echo systemd || echo nohup)
-mcp            : 127.0.0.1:$MCP_PORT  ($UNIT_MCP)
-tunnel health  : 127.0.0.1:$HEALTH_PORT  ($UNIT_TUN)
+mcp            : 127.0.0.1:$MCP_PORT
+tunnel health  : 127.0.0.1:$HEALTH_PORT
 tunnel id      : $TUNNEL_ID
 ready          : $([ "$OK" = 1 ] && echo yes || echo NO)
 restore after VM rebuild: bash $DIR/restore.sh

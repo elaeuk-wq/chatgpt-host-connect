@@ -22,6 +22,18 @@ Target wall-clock: **12–18 min**, of which most is the remote agent working, n
 
 Do steps 1 and 2 in parallel: the bootstrap message needs only the `tunnel_id`.
 
+## Entry points (exactly these four)
+
+| Step | URL | What you do there |
+|---|---|---|
+| 1a | https://platform.openai.com/settings/organization/tunnels | **Create tunnel**, then copy the `tunnel_…` id |
+| 1b | https://platform.openai.com/settings/organization/api-keys | **Create new secret key** → Restricted → Tunnels: Read + Use |
+| 2 | https://muse.ai/ | Send the install message; approval cards appear in the right sidebar |
+| 3 | https://chatgpt.com/plugins | **添加 → 添加自定义 MCP 服务器 → 连接: 隧道** |
+| later | https://chatgpt.com/settings/plugins-settings | Manage / uninstall the connector |
+
+In the connector's tunnel picker the chips show tunnel **names** (`muse-native-run3`), not ids — pick by name, then confirm the id landed in the `tunnel_...` field.
+
 ## 0. Preflight (one message, not three)
 
 Send Muse **one** message asking all of this at once, so you never pay for a second round trip:

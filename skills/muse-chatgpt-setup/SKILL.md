@@ -46,6 +46,8 @@ The approval card is frequently **not** in the chat transcript — it lives in t
 
 ## 1. Platform: tunnel + restricted key
 
+Everything here is **per account**: tunnels and connectors are scoped to whichever OpenAI account/organization you are signed into. Two accounts can each own a tunnel called `aws` — that is not a sign you are in the same place, and you must not expect tunnels or connectors from another account to be visible. Build fresh in the account you are in; nothing else is required.
+
 1. https://platform.openai.com/settings/organization/tunnels → **Create tunnel**. Name it after the purpose (e.g. `muse-chatgpt-native`), pick the org, and select the user's ChatGPT workspace. Copy the `tunnel_…` id — it is not a secret.
 2. Never reuse a tunnel that already carries another service; if one exists (`aws`, etc.) leave it alone.
 3. **The tunnel must be associated with the target ChatGPT workspace**, or it will not appear at all in step 3. The Create dialog's workspace field is easy to miss and its markup differs per organization — if the dialog shows no `Search workspaces by name or ID` control, create anyway and then **Edit tunnel → ChatGPT workspaces → pick the workspace → Save**. Verify success by re-opening the connector dialog and confirming the tunnel name shows up as a chip; a tunnel that is org-scoped but workspace-less is invisible there and every later step is wasted.

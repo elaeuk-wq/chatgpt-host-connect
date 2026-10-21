@@ -22,8 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { connect, StepError, sleep } from './cdp.mjs';
 import { LABELS as L, SELECTORS as S, mergeLabels } from './labels.mjs';
 
-const RELEASE_REF = 'v1.0.0';
-const RAW = `https://raw.githubusercontent.com/elaeuk-wq/muse-chatgpt-setup-skill/${RELEASE_REF}/skills/muse-chatgpt-setup/scripts`;
+
 const SELF = fileURLToPath(import.meta.url);
 const CMD = `node ${SELF}`;
 const KEY_RE = '^sk-[A-Za-z0-9_\\-]{20,}$';
@@ -47,6 +46,9 @@ function parseArgs(argv) {
   return { cmd: pos[0], pos: pos.slice(1), opts };
 }
 const { cmd, pos, opts } = parseArgs(process.argv.slice(2));
+// Scripts the Muse VM downloads: pinned release tag (override --ref only to test an unreleased ref).
+const RELEASE_REF = opts.ref || 'v1.0.0';
+const RAW = `https://raw.githubusercontent.com/elaeuk-wq/muse-chatgpt-setup-skill/${RELEASE_REF}/skills/muse-chatgpt-setup/scripts`;
 const HOME_DIR = path.join(os.homedir(), '.muse-chatgpt-setup');
 const STATE_FILE = path.resolve(opts.state || path.join(HOME_DIR, 'state.json'));
 const DATA_DIR = path.dirname(STATE_FILE);
@@ -1041,7 +1043,7 @@ function keyFromClipboard() {
 function usage() {
   process.stdout.write(`usage:
   ${CMD} run [--mode auto|manual] [--cdp URL] [--workspace NAME] [--project NAME]
-             [--from-step STEP] [--only STEP] [--dry-run] [--keep-key] [--state FILE] [--labels FILE]
+             [--from-step STEP] [--only STEP] [--dry-run] [--keep-key] [--state FILE] [--labels FILE] [--ref TAG]
   ${CMD} state show | done <step> k=v ... | set names.plugin="..." | reset <step> [--rename]
   ${CMD} message install|restore|logs           print the Muse message text
   ${CMD} key-from-clipboard | key-from-page --tab URL

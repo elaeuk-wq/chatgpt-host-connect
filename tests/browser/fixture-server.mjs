@@ -93,15 +93,50 @@ const TUNNELS = page('Tunnels', `<h1>Tunnels</h1><button id="ct">Create tunnel</
 <script>
 async function draw(){ const ts = await fx.api('tunnels'); rows.innerHTML=''; for (const t of ts) rows.append(fx.h('tr',{},fx.h('td',{text:t.name}),fx.h('td',{text:t.id}),fx.h('td',{text:t.workspaces.join(', ')||'—'}))); }
 ct.onclick = () => {
-  const name = fx.h('input', { id: 'tn' });
-  const chips = fx.h('div', {}); const picked = [];
-  const search = fx.h('input', { role: 'combobox', placeholder: 'Search workspaces by name or ID' });
-  let lb;
-  const show = async () => { lb && lb.remove(); const ws = (await fx.api('workspaces')).filter((w) => w.toLowerCase().includes(search.value.toLowerCase())); lb = fx.h('div', { role: 'listbox' }); ws.forEach((w) => lb.append(fx.h('div', { role: 'option', text: w, onclick: () => { if (!picked.includes(w)) { picked.push(w); chips.append(fx.h('span', { class: 'chip', text: w })); } lb.remove(); lb = null; } }))); search.after(lb); };
-  search.addEventListener('focus', show); search.addEventListener('input', show);
-  const d = fx.dialog('Create tunnel', fx.h('div',{class:'row'}, fx.h('label', { for: 'tn', text: 'Name' }), name), fx.h('div',{class:'row'}, fx.h('span',{text:'ChatGPT workspaces'}), search), chips,
-    fx.h('button', { text: 'Cancel', onclick: () => d.remove() }),
-    fx.h('button', { text: 'Create', onclick: async () => { await fx.api('tunnels', { name: name.value, workspaces: picked }); d.remove(); draw(); } }));
+  // Mirrors the real Platform dialog (2026-10): Name* + Description* required,
+  // Create disabled until valid; the workspaces field is a button that opens a
+  // popover [role=dialog] with a search combobox and toggling [role=option]s;
+  // a click elsewhere in the main dialog closes it; Escape does not.
+  const name = fx.h('input', { id: 'tn', placeholder: 'e.g. West Coast MCP tunnel' });
+  const desc = fx.h('textarea', { id: 'td', placeholder: 'Add a short description to help your team.' });
+  const picked = [];
+  const PH = 'Search workspaces by name or ID';
+  const trigger = fx.h('span', { role: 'button', 'aria-expanded': 'false', text: PH });
+  const create = fx.h('button', { text: 'Create', disabled: true, 'aria-disabled': 'true' });
+  const sync = () => {
+    const ok = !!(name.value && desc.value && picked.length);
+    create.disabled = !ok; create.setAttribute('aria-disabled', String(!ok));
+    trigger.textContent = picked.length ? picked.join(', ') : PH;
+  };
+  name.addEventListener('input', sync); desc.addEventListener('input', sync);
+  let pop = null;
+  const closePop = () => { if (pop) { pop.remove(); pop = null; trigger.setAttribute('aria-expanded', 'false'); sync(); } };
+  trigger.addEventListener('click', async () => {
+    if (pop) return closePop();
+    const search = fx.h('input', { role: 'combobox', placeholder: PH, 'aria-expanded': 'true' });
+    const list = fx.h('div', {});
+    const show = async () => {
+      list.innerHTML = '';
+      for (const w of (await fx.api('workspaces')).filter((x) => x.toLowerCase().includes(search.value.toLowerCase()))) {
+        const o = fx.h('div', { role: 'option', 'aria-selected': String(picked.includes(w)), text: w });
+        o.addEventListener('click', () => { const i = picked.indexOf(w); if (i < 0) picked.push(w); else picked.splice(i, 1); o.setAttribute('aria-selected', String(picked.includes(w))); });
+        list.append(o);
+      }
+    };
+    search.addEventListener('input', show);
+    const r = trigger.getBoundingClientRect();
+    pop = fx.h('div', { role: 'dialog', style: 'position:fixed;left:' + r.left + 'px;top:' + (r.bottom + 4) + 'px;background:#fff;border:1px solid #999;z-index:1000' }, search, list);
+    document.body.append(pop); trigger.setAttribute('aria-expanded', 'true');
+    await show(); search.focus();
+  });
+  const d = fx.dialog('Create tunnel',
+    fx.h('div',{class:'row'}, fx.h('label', { for: 'tn', text: 'Name *' }), name),
+    fx.h('div',{class:'row'}, fx.h('label', { for: 'td', text: 'Description *' }), desc),
+    fx.h('div',{class:'row'}, fx.h('label', { text: 'ChatGPT workspaces' }), trigger),
+    fx.h('button', { text: 'Cancel', onclick: () => { closePop(); d.remove(); } }),
+    create);
+  create.addEventListener('click', async () => { if (create.disabled) return; await fx.api('tunnels', { name: name.value, workspaces: picked }); d.remove(); draw(); });
+  document.addEventListener('pointerdown', (e) => { if (pop && !pop.contains(e.target) && e.target !== trigger) closePop(); }, true);
 };
 draw();
 </script>`);
@@ -110,24 +145,72 @@ const KEYS = page('API keys', `<h1>API keys</h1><button id="ck">+ Create new sec
 <script>
 async function draw(){ const ks = await fx.api('keys'); rows.innerHTML=''; for (const k of ks) rows.append(fx.h('tr',{},fx.h('td',{text:k.name}),fx.h('td',{text:k.masked}),fx.h('td',{text:k.restricted?'Restricted':'All'}),fx.h('td',{text:k.expiry}))); }
 ck.onclick = async () => {
+  // Mirrors the real Platform dialog (2026-10). Fields are label + trigger
+  // span[role=button][aria-expanded] opening a portaled [role=dialog] list of
+  // [role=option]; project/expiry single-select (expiry disabled until a
+  // project is set); per-resource permissions multi-select, Tunnels: Read/Use
+  // (Use ticks Read; trigger then says "All selected"). The name input is
+  // re-created by the first keystroke, like a React remount.
   const cfg = await fx.api('config');
-  const name = fx.h('input', { id: 'kn', placeholder: 'My Test Key' });
-  const project = fx.select({ label: 'Project', options: ['Default project', 'Research'], value: 'Default project' });
+  let name = fx.h('input', { id: 'kn', placeholder: 'My Test Key' });
+  name.addEventListener('input', function remount() { const n2 = fx.h('input', { id: 'kn', placeholder: 'My Test Key' }); n2.value = name.value; name.replaceWith(n2); name = n2; n2.focus(); }, { once: true });
+  let pop = null;
+  const closePop = () => { if (pop) { pop.el.remove(); pop.trig.setAttribute('aria-expanded', 'false'); pop = null; sync(); } };
+  document.addEventListener('pointerdown', (e) => { if (pop && !pop.el.contains(e.target) && !pop.trig.contains(e.target)) closePop(); }, true);
+  const field = (placeholder, options, { multi = false, disabled = false, onPick, show } = {}) => {
+    const f = { value: multi ? [] : null, disabled };
+    const trig = fx.h('span', { role: 'button', 'aria-expanded': 'false', 'aria-disabled': String(disabled), text: placeholder });
+    f.trig = trig;
+    f.render = () => { trig.textContent = show ? show(f.value) : (f.value || placeholder); trig.setAttribute('aria-disabled', String(f.disabled)); };
+    trig.addEventListener('click', () => {
+      if (f.disabled) return;
+      if (pop && pop.trig === trig) return closePop();
+      closePop();
+      const r = trig.getBoundingClientRect();
+      const el = fx.h('div', { role: 'dialog', style: 'position:fixed;left:' + r.left + 'px;top:' + (r.bottom + 4) + 'px;background:#fff;border:1px solid #999;z-index:1000' });
+      const lb = fx.h('div', { role: 'listbox' }); el.append(lb);
+      const draw = () => { lb.innerHTML = ''; for (const o of options) { const sel = multi ? f.value.includes(o) : f.value === o; lb.append(fx.h('div', { role: 'option', 'aria-selected': String(sel), text: o, onclick: () => {
+        if (multi) { const i = f.value.indexOf(o); if (i < 0) f.value.push(o); else f.value.splice(i, 1); onPick && onPick(o, f); draw(); f.render(); }
+        else { f.value = o; f.render(); closePop(); onPick && onPick(o, f); }
+      } })); } };
+      draw(); document.body.append(el); trig.setAttribute('aria-expanded', 'true'); pop = { el, trig };
+    });
+    return f;
+  };
+  const project = field('Select project...', ['Default project'], { onPick: () => { exp.disabled = false; exp.render(); } });
+  const exp = field('有效期 选择有效期', cfg.fail.includes('key-expiry-label') ? ['1 周', '1 个月', '永不过期'] : ['1 天', '7 天', '30 天', '永不过期', '自定义'], { disabled: true });
+  exp.render = ((r) => () => { r(); if (exp.value) exp.trig.textContent = '有效期 ' + exp.value; })(exp.render);
+  const showPerm = (all) => (v) => (!v.length ? 'None' : v.length === all.length ? 'All selected' : v.join(', '));
   const perms = {}; const permBox = fx.h('div', { style: 'display:none' });
   for (const r of ['Models', 'Assistants', 'Tunnels']) {
-    const s = fx.seg(r, r === 'Tunnels' ? ['None', 'Read', 'Read + Use'] : ['None', 'Read', 'Write'], 'None');
-    perms[r] = s; permBox.append(fx.h('div', { class: 'row' }, fx.h('span', { text: r }), s.el));
+    const options = r === 'Tunnels' ? ['Read', 'Use'] : ['Read', 'Write'];
+    perms[r] = field('None', options, { multi: true, show: showPerm(options), onPick: (o, f) => { if (r === 'Tunnels' && o === 'Use' && f.value.includes('Use') && !f.value.includes('Read')) f.value.push('Read'); } });
+    permBox.append(fx.h('div', { class: 'row' }, fx.h('button', { text: r, disabled: true }), perms[r].trig));
   }
-  const mode = fx.seg('Permissions', ['All', 'Restricted', 'Read only'], 'All', (v) => { permBox.style.display = v === 'Restricted' ? '' : 'none'; });
-  const exp = fx.select({ label: 'Expiration', options: cfg.fail.includes('key-expiry-label') ? ['1 week', '1 month', '3 months', 'Never'] : ['7 days', '30 days', '90 days', 'Never'], placeholder: 'Select expiration', onChange: () => { create.disabled = false; } });
-  const create = fx.h('button', { text: 'Create secret key', disabled: true, onclick: async () => {
-    const r = await fx.api('keys', { name: name.value, restricted: mode.value === 'Restricted', perms: Object.fromEntries(Object.entries(perms).map(([k, v]) => [k, v.value])), expiry: exp.value, project: project.value });
-    d.remove();
+  const footer = fx.h('div', {});
+  const mode = fx.seg('Permissions', ['All', 'Restricted', 'Read only'], 'All', (v) => { permBox.style.display = v === 'Restricted' ? '' : 'none'; sync(); });
+  const create = fx.h('button', { text: 'Create secret key', disabled: true, 'aria-disabled': 'true' });
+  const count = () => Object.values(perms).reduce((n, p) => n + p.value.length, 0);
+  function sync() {
+    footer.textContent = count() + ' selected permissions';
+    const ok = !!(project.value && exp.value && (mode.value !== 'Restricted' || count()));
+    create.disabled = !ok; create.setAttribute('aria-disabled', String(!ok));
+  }
+  const permValue = (r) => { const v = perms[r].value; if (!v.length) return 'None'; if (r === 'Tunnels') return v.includes('Use') ? 'Read + Use' : 'Read'; return v.includes('Write') ? 'Write' : 'Read'; };
+  create.addEventListener('click', async () => {
+    if (create.disabled) return;
+    const r = await fx.api('keys', { name: name.value, restricted: mode.value === 'Restricted', perms: Object.fromEntries(Object.keys(perms).map((k) => [k, permValue(k)])), expiry: (exp.value || '').replace(/ 天$/, ' days'), project: project.value });
+    closePop(); d.remove();
     const inp = fx.h('input', { readonly: true, value: r.key, style: 'width:420px' });
     const d2 = fx.dialog('Save your key', fx.h('p', { text: 'Please save this secret key somewhere safe.' }), inp, fx.h('button', { text: 'Copy' }), fx.h('button', { text: 'Done', onclick: () => { d2.remove(); draw(); } }));
-  } });
-  const d = fx.dialog('Create new secret key', fx.h('div', { class: 'row' }, fx.h('label', { for: 'kn', text: 'Name' }), name), project.el,
-    fx.h('div', { class: 'row' }, fx.h('span', { text: 'Permissions' }), mode.el), permBox, exp.el, fx.h('button', { text: 'Cancel', onclick: () => d.remove() }), create);
+  });
+  const d = fx.dialog('Create new secret key',
+    fx.h('div', { class: 'row' }, fx.h('label', { for: 'kn', text: 'Name Optional' }), name),
+    fx.h('div', { class: 'row' }, fx.h('label', { text: 'Project' }), project.trig),
+    fx.h('div', { class: 'row' }, fx.h('label', { text: '有效期' }), exp.trig),
+    fx.h('div', { class: 'row' }, fx.h('span', { text: 'Permissions' }), mode.el), permBox, footer,
+    fx.h('button', { text: 'Cancel', onclick: () => { closePop(); d.remove(); } }), create);
+  sync();
 };
 draw();
 </script>`);

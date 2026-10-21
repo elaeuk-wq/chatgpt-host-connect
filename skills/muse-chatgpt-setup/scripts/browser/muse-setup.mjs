@@ -364,20 +364,41 @@ async function tunnelRow(page, name) {
   }, { name });
 }
 
-async function pickWorkspace(page, c) {
+// Platform: the field is a button showing a placeholder; it opens a popover
+// (a second [role=dialog]) with a search combobox and multi-select options.
+// `closeOn` is an element of the main dialog; clicking it closes the popover
+// (Escape is not reliable there).
+async function pickWorkspace(page, c, closeOn) {
   const want = c.opts.workspace ? [c.opts.workspace] : null;
-  const f = (await page.field({ scope: 'dialog', label: L.platform.workspaceField }))[0];
-  if (!f) return null;
-  await page.click(f.id);
-  if (want && f.tag === 'input') { await page.focus(f.id); await page.insertText(want[0]); }
-  const optCss = '[role=option],[role=menuitemcheckbox],[role=menuitem],[cmdk-item],[role=listbox] li';
-  const opts = await page.waitFor(() => page.find({ css: optCss, text: want || [] , limit: 20 }), { timeout: T(5000) });
+  const trigger = (await page.find({ scope: 'dialog', text: L.platform.workspaceField, css: '[role=button],button,[role=combobox]', limit: 1 }))[0];
+  if (!trigger) return null;
+  await page.click(trigger.id, { settle: 500 });
+  if (want) {
+    const box = (await page.find({ css: 'input[role=combobox]', limit: 1 }))[0];
+    if (box) { await page.focus(box.id); await page.insertText(want[0]); await sleep(500); }
+  }
+  const opts = await page.waitFor(() => page.find({ css: '[role=option]', text: want || [], limit: 20 }), { timeout: T(5000) });
   if (!opts) throw new StepError('no ChatGPT workspace offered', { expected: want ? `workspace "${want[0]}" in the list` : 'at least one workspace option', found: await page.snapshot({ scope: 'dialog' }) });
   if (!want && opts.length > 1) {
-    throw new StepError('several ChatGPT workspaces - choose one', { expected: 'rerun with --workspace "<name>"', found: opts.map((o) => o.text) });
+    throw new StepError('several ChatGPT workspaces - choose one', { expected: 'rerun with --workspace "<name or id>"', found: opts.map((o) => o.text) });
   }
-  await page.click(opts[0].id);
-  return opts[0].text;
+  const pick = opts[0];
+  if (pick.state?.['aria-selected'] !== 'true') await page.click(pick.id, { settle: 400 });
+  const selected = await page.find({ css: '[role=option][aria-selected=true]', limit: 20 });
+  if (!selected.some((o) => o.text === pick.text)) {
+    throw new StepError('workspace option did not get selected', { expected: `option "${pick.text}" aria-selected=true`, found: await page.snapshot({ scope: 'dialog' }) });
+  }
+  if (closeOn) await page.click(closeOn, { settle: 500 }); else await page.press('Escape');
+  const shown = await page.waitFor(() => page.grep({ scope: 'dialog', re: pick.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }), { timeout: T(3000) });
+  if (!shown) throw new StepError('workspace not shown in the dialog after picking', { expected: `the workspaces field shows "${pick.text}"`, found: await page.snapshot({ scope: 'dialog' }) });
+  return pick.text;
+}
+
+async function submitEnabled(page, labels, what) {
+  const btn = (await page.find({ scope: 'dialog', text: labels, css: 'button,[role=button],input[type=submit]', limit: 1 }))[0];
+  if (!btn || btn.state?.disabled || btn.state?.['aria-disabled'] === 'true') {
+    throw new StepError(`${what} is disabled - a required field is empty or invalid`, { expected: `${what} enabled`, found: await page.snapshot({ scope: 'dialog' }) });
+  }
 }
 
 async function ensureWorkspace(page, c, name, workspace) {
@@ -404,20 +425,31 @@ async function stepTunnel(c) {
   if (await tunnelRow(page, name)) throw new Refuse(`a tunnel named ${name} already exists but is not in the state file`, { record: STEPS[0].manual(c).record });
   await page.click({ text: L.platform.createTunnel }, { what: 'Create tunnel', settle: 600 });
   await payWall(page);
-  await page.fill({ scope: 'dialog', label: L.platform.tunnelName }, name, { what: 'tunnel name' });
-  let workspace = await pickWorkspace(page, c);
+  const nameField = await page.fill({ scope: 'dialog', label: L.platform.tunnelName }, name, { what: 'tunnel name' });
+  let workspace = await pickWorkspace(page, c, nameField?.id);
+  const desc = (await page.field({ scope: 'dialog', label: L.platform.tunnelDescription }))[0];
+  if (desc) await page.fill({ scope: 'dialog', label: L.platform.tunnelDescription }, 'ChatGPT to Muse VM link (muse-chatgpt-setup)', { what: 'tunnel description' });
+  await submitEnabled(page, L.platform.createSubmit, 'Create (tunnel dialog)');
+  // ids already on the page: the new tunnel's id must not be one of them
+  const before = new Set((await page.grep({ re: 'tunnel_[A-Za-z0-9]{6,}', hidden: true })).flatMap((l) => l.match(/tunnel_[A-Za-z0-9]{6,}/g) || []));
   c.submitted();
   await page.click({ scope: 'dialog', text: L.platform.createSubmit, css: 'button,[role=button],input[type=submit]' }, { what: 'Create (tunnel dialog)', settle: 1000 });
   const row = await page.waitFor(async () => {
     const inDialog = await page.grep({ scope: 'dialog', re: 'tunnel_[A-Za-z0-9]{6,}' });
-    if (inDialog.length) return { id: /tunnel_[A-Za-z0-9]{6,}/.exec(inDialog[0])[0] };
+    const m = inDialog.length && /tunnel_[A-Za-z0-9]{6,}/.exec(inDialog[0]);
+    if (m && !before.has(m[0])) return { id: m[0] };
     const r = await tunnelRow(page, name);
-    return r?.id ? r : null;
+    return r?.id && !before.has(r.id) ? r : null;
   }, { timeout: T(15000) });
-  if (!row) throw new StepError('tunnel id not found after Create', { expected: `a tunnel_... id next to "${name}"`, found: await page.snapshot({ text: [name] }) });
+  let found = row;
+  if (!found) { // the list may not refresh by itself
+    await page.goto(URLS.platform + '/settings/organization/tunnels');
+    found = await page.waitFor(async () => { const r = await tunnelRow(page, name); return r?.id && !before.has(r.id) ? r : null; }, { timeout: T(10000) });
+  }
+  if (!found) throw new StepError('tunnel id not found after Create', { expected: `a new tunnel_... id next to "${name}"`, found: await page.snapshot({ text: [name] }) });
   await page.press('Escape');
   workspace = await ensureWorkspace(page, c, name, workspace);
-  return { tunnel_id: row.id, tunnel_name: name, workspace };
+  return { tunnel_id: found.id, tunnel_name: name, workspace };
 }
 
 async function recoverTunnel(c) {
@@ -437,57 +469,119 @@ async function keyRow(page, name) {
   }, { name });
 }
 
-async function setTunnelsPermission(page) {
-  // Find the "Tunnels" row inside the dialog and pick Read + Use there.
-  const rowId = await page.eval((a) => {
-    const d = [...document.querySelectorAll('[role=dialog],[aria-modal=true],dialog[open]')].pop() || document.body;
-    const norm = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
-    const labels = [...d.querySelectorAll('*')].filter((e) => e.children.length === 0 && a.names.includes(norm(e.textContent)));
-    for (const lab of labels) {
+// Platform key dialog (2026-10): every field is a label (or a disabled label
+// button) next to a [role=button][aria-expanded] trigger; the trigger opens a
+// portaled list of [role=option]. Project and expiry are single-select (the
+// list closes on pick, expiry stays disabled until a project is set); the
+// per-resource permissions are multi-select (Tunnels: Read, Use - picking Use
+// also ticks Read, the trigger then says "All selected").
+const TRIGGER = '[role=button][aria-expanded],[role=combobox],button[aria-haspopup]';
+const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+async function rowTrigger(page, labels) {
+  return page.eval((a) => {
+    const d = [...document.querySelectorAll('[role=dialog],[aria-modal=true],dialog[open]')].find((e) => e.getClientRects().length) || document.body;
+    const n = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    for (const lab of d.querySelectorAll('label,button,span,div,p')) {
+      if (!a.names.includes(n(lab.innerText))) continue;
+      const own = lab.closest(a.trig);
+      if (own && own !== lab) return window.__mcs.tag(own);
+      if (lab.matches(a.trig)) continue;
       let row = lab;
-      for (let i = 0; i < 5 && row.parentElement; i++) {
+      for (let i = 0; i < 4 && row.parentElement; i++) {
         row = row.parentElement;
-        if (row.querySelector('button,[role=radio],[role=combobox],input,select')) return window.__mcs.tag(row);
+        const t = row.querySelector(a.trig);
+        if (t) return window.__mcs.tag(t);
       }
     }
     return null;
-  }, { names: L.platform.tunnelsRow.map((s) => s.toLowerCase()) });
-  if (!rowId) throw new StepError('"Tunnels" permission row not found', { expected: 'a Tunnels row under Restricted permissions', found: await page.snapshot({ scope: 'dialog' }) });
-  const combo = await page.find({ within: rowId, css: '[role=combobox],select,button[aria-haspopup]', text: [] });
-  if (combo.length) {
-    await page.select({ within: rowId, label: [], css: '[role=combobox],select,button[aria-haspopup]' }, L.platform.tunnelsReadUse, { what: 'Tunnels permission' }).catch(async () => {
-      await page.select({ within: rowId, label: [], css: '[role=combobox],select,button[aria-haspopup]' }, L.platform.tunnelsUse, { what: 'Tunnels permission' });
-    });
-  } else {
-    let opt = (await page.find({ within: rowId, text: L.platform.tunnelsReadUse }))[0];
-    if (opt) await page.click(opt.id);
-    else {
-      // separate Read and Use toggles
-      for (const want of [L.platform.tunnelsRead, L.platform.tunnelsUse]) {
-        const t = (await page.find({ within: rowId, text: want }))[0];
-        if (!t) throw new StepError('Tunnels Read/Use control not found', { expected: 'Read + Use option in the Tunnels row', found: await page.find({ within: rowId, text: [] }) });
-        const st = await page.state(t.id);
-        if (!st.selected) await page.click(t.id);
-      }
-    }
-  }
-  return rowId;
+  }, { names: labels.map((s) => s.toLowerCase()), trig: TRIGGER });
 }
 
-async function verifyKeyForm(page, rowId) {
-  const sel = await page.selectedIn({ scope: 'dialog' });
+// Open `triggerId` and make sure one option per entry of `wants` (each a list
+// of label alternatives) is selected. wants = null: take the only option, else
+// one of `preferred`. Returns the chosen option texts.
+async function pickOptions(page, triggerId, wants, { what, preferred = [], keepOpen = false } = {}) {
+  await page.click(triggerId, { settle: 500 });
+  let opts = await page.waitFor(() => page.find({ css: '[role=option]', text: [], limit: 40 }), { timeout: T(5000) });
+  if (!opts) throw new StepError(`${what}: no options offered`, { expected: `a list of ${what} options`, found: await page.snapshot({ scope: 'dialog' }) });
+  if (!wants) {
+    const pref = opts.find((o) => preferred.map(norm).includes(norm(o.text)));
+    if (opts.length > 1 && !pref) throw new StepError(`several ${what} options - choose one`, { expected: `rerun with --${what} "<name>"`, found: opts.map((o) => o.text) });
+    wants = [[(pref || opts[0]).text]];
+  }
+  const chosen = [];
+  for (const alts of wants) {
+    const o = opts.find((x) => alts.map(norm).includes(norm(x.text)));
+    if (!o) throw new StepError(`${what}: option not offered`, { expected: alts.join(' | '), found: opts.map((x) => x.text) });
+    if (o.state?.['aria-selected'] !== 'true') await page.click(o.id, { settle: 400 });
+    chosen.push(o.text);
+    opts = (await page.find({ css: '[role=option]', text: [], limit: 40 })) || [];
+    if (!opts.length) break; // single-select list closed itself
+  }
+  if (opts.length) {
+    const sel = opts.filter((x) => x.state?.['aria-selected'] === 'true').map((x) => norm(x.text));
+    const missing = chosen.filter((t) => !sel.includes(norm(t)));
+    if (missing.length) throw new StepError(`${what}: option did not get selected`, { expected: chosen.join(' + '), found: opts.map((x) => `${x.text}=${x.state?.['aria-selected']}`) });
+    if (!keepOpen) await page.click(triggerId, { settle: 400 }); // toggles the list closed
+  }
+  return chosen;
+}
+
+async function triggerText(page, labels) {
+  const id = await rowTrigger(page, labels);
+  return id ? norm((await page.state(id))?.text) : null;
+}
+
+async function fillKeyForm(page, c, name) {
+  await page.fill({ scope: 'dialog', label: L.platform.keyName }, name, { what: 'key name' });
+  const proj = await rowTrigger(page, L.platform.project);
+  let project = null;
+  if (proj) {
+    const shown = norm((await page.state(proj))?.text);
+    if (c.opts.project || !shown || /select|choose|选择/.test(shown)) {
+      [project] = await pickOptions(page, proj, c.opts.project ? [[c.opts.project]] : null, { what: 'project', preferred: L.platform.defaultProject });
+    } else project = shown;
+  }
+  const restricted = await page.findOne({ scope: 'dialog', text: L.platform.restricted, css: '[role=radio],button,label' }, { what: 'Permissions: Restricted' });
+  await page.click(restricted.id, { settle: 600 });
+  const tun = await rowTrigger(page, L.platform.tunnelsRow);
+  if (!tun) throw new StepError('"Tunnels" permission row not found', { expected: 'a Tunnels row under Restricted permissions', found: await page.snapshot({ scope: 'dialog' }) });
+  await pickOptions(page, tun, [L.platform.tunnelsUse, L.platform.tunnelsRead], { what: 'Tunnels permission' });
+  const exp = await page.waitFor(async () => { const id = await rowTrigger(page, L.platform.expiry); return id && (await page.state(id))?.state?.['aria-disabled'] !== 'true' ? id : null; }, { timeout: T(5000) });
+  if (!exp) throw new StepError('expiration field not available', { expected: 'an enabled expiration field (it unlocks after a project is chosen)', found: await page.snapshot({ scope: 'dialog' }) });
+  await pickOptions(page, exp, [L.platform.expiry30], { what: 'expiration' });
+  return project;
+}
+
+// Readback: Restricted on; Tunnels shows Read + Use; every other resource None;
+// expiry 30 days; the footer counts exactly the two Tunnels permissions.
+async function verifyKeyForm(page) {
   const problems = [];
-  const rowText = await page.eval((a) => window.__mcs.byId(a.id).innerText.replace(/\s+/g, ' '), { id: rowId });
-  const tunnelsSel = sel.filter((s) => rowText.includes(s.row) || s.row.includes(rowText.slice(0, 40)));
-  const okTunnels = tunnelsSel.some((s) => /read.*use|use|读取.*使用|使用/i.test(`${s.text} ${s.value || ''}`));
-  if (!okTunnels) problems.push('Tunnels row does not show Read + Use');
-  const restricted = sel.some((s) => L.platform.restricted.some((r) => s.text.toLowerCase().includes(r.toLowerCase())));
-  if (!restricted) problems.push('Permissions is not Restricted');
-  const others = sel.filter((s) => !tunnelsSel.includes(s) && /^(read|write|use|all|读取|写入|使用|全部)/i.test(s.text) && !/restricted|受限/i.test(s.text));
-  if (others.length) problems.push('other resources have access: ' + others.map((o) => o.row).join(' | '));
-  const exp = sel.find((s) => /30/.test(`${s.text} ${s.value || ''}`));
-  if (!exp) problems.push('expiry does not show 30 days');
-  return { problems, seen: sel.map((s) => ({ text: s.text, value: s.value, row: s.row })) };
+  const r = (await page.find({ scope: 'dialog', text: L.platform.restricted, css: '[role=radio],button', limit: 1 }))[0];
+  if (r?.state?.['aria-checked'] !== 'true' && r?.state?.['data-state'] !== 'on') problems.push('Permissions is not Restricted');
+  const tun = await triggerText(page, L.platform.tunnelsRow);
+  const allSel = L.platform.allSelected.map(norm);
+  if (!(allSel.includes(tun) || (/read|读取/.test(tun) && /use|使用/.test(tun)))) problems.push(`Tunnels shows "${tun}", not Read + Use`);
+  const others = await page.eval((a) => {
+    const d = [...document.querySelectorAll('[role=dialog],[aria-modal=true],dialog[open]')].find((e) => e.getClientRects().length) || document.body;
+    const n = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const out = [];
+    for (const t of d.querySelectorAll(a.trig)) {
+      let row = t; let label = '';
+      for (let i = 0; i < 4 && row.parentElement && !label; i++) { row = row.parentElement; label = n([...row.querySelectorAll('button,label,span')].find((e) => e !== t && !t.contains(e) && n(e.innerText))?.innerText); }
+      out.push({ label, value: n(t.innerText) });
+    }
+    return out;
+  }, { trig: TRIGGER });
+  const skip = [...L.platform.tunnelsRow, ...L.platform.project, ...L.platform.expiry].map(norm);
+  const open = others.filter((o) => !skip.some((s) => o.label === s || o.label.startsWith(s)) && !L.platform.noneValue.map(norm).includes(o.value) && !/select|选择/.test(o.value));
+  if (open.length) problems.push('other resources have access: ' + open.map((o) => `${o.label}=${o.value}`).join(' | '));
+  const exp = await triggerText(page, L.platform.expiry);
+  if (!/30/.test(exp || '')) problems.push(`expiry shows "${exp}", not 30 days`);
+  const count = (await page.grep({ scope: 'dialog', re: '(\\d+)\\s*(selected permissions?|个已选权限|项已选权限)' }))[0];
+  if (count && !/\b2\b/.test(count)) problems.push(`footer says "${count}" (expected 2: Tunnels Read + Use)`);
+  return { problems, seen: { tunnels: tun, expiry: exp, footer: count || null } };
 }
 
 async function stepKey(c) {
@@ -497,15 +591,10 @@ async function stepKey(c) {
   if (await keyRow(page, name)) throw new Refuse(`a key named ${name} already exists but is not recorded`, { record: STEPS[1].manual(c).record });
   await page.click({ text: L.platform.createKey }, { what: 'Create new secret key', settle: 700 });
   await payWall(page);
-  await page.fill({ scope: 'dialog', label: L.platform.keyName }, name, { what: 'key name' });
-  if (c.opts.project) await page.select({ scope: 'dialog', label: L.platform.project }, [c.opts.project], { what: 'project' });
-  const restricted = await page.findOne({ scope: 'dialog', text: L.platform.restricted }, { what: 'Permissions: Restricted' });
-  await page.click(restricted.id);
-  const rowId = await setTunnelsPermission(page);
-  await page.select({ scope: 'dialog', label: L.platform.expiry }, L.platform.expiry30, { what: 'expiration' });
-  const v = await verifyKeyForm(page, rowId);
+  const projectShown = await fillKeyForm(page, c, name);
+  const v = await verifyKeyForm(page);
   if (v.problems.length) throw new StepError('key form readback does not match', { expected: 'Restricted; Tunnels Read + Use only; 30 days', problems: v.problems, found: v.seen });
-  const projectShown = (await page.field({ scope: 'dialog', label: L.platform.project }))[0]?.text;
+  await submitEnabled(page, L.platform.createKeySubmit, 'Create secret key');
 
   let fp;
   if (c.opts.mode === 'manual') {

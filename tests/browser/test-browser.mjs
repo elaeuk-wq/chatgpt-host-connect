@@ -88,7 +88,7 @@ await api('reset', { fail: ['key-expiry-label', 'plugin-list-hidden-once'] });
 const SB = path.join(WORK, 'B', 'state.json');
 r = cli(SB, 'run');
 check('run stops at step "key" with exit 10', r.code === 10 && r.last.step === 'key', r.last);
-check('failure says what was expected and what was seen', /expir/i.test(JSON.stringify(r.last.expected)) && JSON.stringify(r.last.found).includes('1 month'), r.last);
+check('failure says what was expected and what was seen', /expir/i.test(r.last.error + JSON.stringify(r.last.expected)) && JSON.stringify(r.last.found).includes('1 个月'), r.last);
 check('failure carries takeover do/verify/record/resume', r.last.takeover?.do?.length && r.last.takeover.verify?.length && /state done key|key-from/.test(r.last.takeover.record) && r.last.takeover.resume, r.last.takeover);
 let sb = state(SB);
 check('state: tunnel done, key failed (not submitted)', sb.steps.tunnel.status === 'done' && sb.steps.key.status === 'failed');

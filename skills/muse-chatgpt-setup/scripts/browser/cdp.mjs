@@ -425,7 +425,8 @@ const HELPERS = String.raw`(() => {
 
   // Lines of visible text matching a regex, excluding editors. Redacted.
   function grep(spec) {
-    const r = root(spec) || document.body;
+    // scope 'dialog' with no dialog open matches nothing (never the whole page)
+    const r = root(spec); if (!r) return [];
     const re = new RegExp(spec.re, spec.flags || 'i');
     const lines = [];
     const walker = document.createTreeWalker(r, NodeFilter.SHOW_TEXT);
@@ -463,7 +464,7 @@ const HELPERS = String.raw`(() => {
 
   // Selected / non-default choices inside a container (for permission readback).
   function selectedIn(spec) {
-    const r = root(spec) || document.body;
+    const r = root(spec); if (!r) return [];
     return [...r.querySelectorAll('[aria-checked],[aria-pressed],[aria-selected],[data-state],input[type=checkbox],input[type=radio],[role=combobox],select')]
       .filter((el) => visible(el) && (isSelected(el) || el.matches('[role=combobox],select')))
       .slice(0, 60).map((el) => {
@@ -474,7 +475,7 @@ const HELPERS = String.raw`(() => {
   }
 
   function readSecret(spec) {
-    const r = root(spec) || document.body;
+    const r = root(spec); if (!r) return null;
     const re = new RegExp(spec.re);
     for (const el of r.querySelectorAll('input,textarea,code,pre,span,div')) {
       const v = el.matches('input,textarea') ? el.value : (el.children.length ? '' : el.textContent);
@@ -629,10 +630,15 @@ export class Page {
     await this.focus(f.id);
     await this.press('Backspace');
     if (value) await this.insertText(value);
-    await sleep(150);
-    const st = await this.state(f.id);
-    const got = st?.value ?? st?.text ?? '';
-    if (value && !String(got).includes(value.slice(0, 50))) {
+    // React may re-render the input (its element id is then gone): re-find it by spec.
+    const took = (st) => String(st?.value ?? st?.text ?? '').includes(value.slice(0, 50));
+    let st = null;
+    for (let i = 0; i < 6; i++) {
+      await sleep(150);
+      st = (await this.state(f.id)) || (await this.field(spec))[0] || null;
+      if (!value || took(st)) break;
+    }
+    if (value && !took(st)) {
       throw new StepError(`field did not take the value: ${what}`, { expected: `${what} = ${value}`, found: [st] });
     }
     return f;

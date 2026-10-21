@@ -39,12 +39,8 @@ ChatGPT 多出一个插件，里面两个工具真的在你的 Muse VM 上执行
 
 ## 前提
 
-- **开了远程调试的 Chrome**，已登录 platform.openai.com、chatgpt.com 和 muse.ai。Chrome 136 起远程调试必须用单独的用户目录：
-  ```bash
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-    --remote-debugging-port=9333 --user-data-dir="$HOME/.muse-chatgpt-setup/chrome"
-  ```
-  在这个窗口里把三个网站各登录一次。技能默认连 `http://127.0.0.1:9333`，可改。
+- **你日常用的 Chrome，打开远程调试**，并已登录 platform.openai.com、chatgpt.com 和 muse.ai。地址栏打开 `chrome://inspect/#remote-debugging`，把开关打开（Chrome 144 起）。技能第一次连接时 Chrome 会弹窗，点一次 **允许** 即可。连接地址技能自己找。
+  - 另一种：用单独的用户目录启动 Chrome：`--remote-debugging-port=9333 --user-data-dir="$HOME/.muse-chatgpt-setup/chrome"`（在里面登录一次），再传 `--cdp http://127.0.0.1:9333`。
 - agent 所在机器有 **Node.js 22+**（不需要装 npm 包）。半自动模式需要 macOS（`pbpaste`）。
 - OpenAI 账号有建隧道和 API Key 的权限；Muse VM 上有 `curl` 和 `python3`。
 
@@ -66,15 +62,15 @@ cp -r muse-chatgpt-setup-skill/skills/muse-chatgpt-setup ~/.codex/skills/
 
 **半自动**——除了 Key 的创建和复制，其余都由 agent 完成：
 
-> 用 muse-chatgpt-setup 技能，以半自动 Key 模式把我的 ChatGPT 和 Muse 连起来。我在 http://127.0.0.1:9333 的 Chrome 已登录 platform.openai.com、chatgpt.com 和 muse.ai。你可以新建隧道、受限 API Key、ChatGPT 插件，在我的 Muse VM 上安装连接器，并批准本流程自己的审批卡。Key 表单填好后告诉我，我自己点创建和复制；其余步骤你做完直到最终验收，最后按步骤报告 PASS/BLOCKED。
+> 用 muse-chatgpt-setup 技能，以半自动 Key 模式把我的 ChatGPT 和 Muse 连起来。我的 Chrome 已打开远程调试，并已登录 platform.openai.com、chatgpt.com 和 muse.ai。你可以新建隧道、受限 API Key、ChatGPT 插件，在我的 Muse VM 上安装连接器，并批准本流程自己的审批卡。Key 表单填好后告诉我，我自己点创建和复制；其余步骤你做完直到最终验收，最后按步骤报告 PASS/BLOCKED。
 
-> Use the muse-chatgpt-setup skill in semi-automatic key mode to connect my ChatGPT and Muse. My Chrome at http://127.0.0.1:9333 is signed in to platform.openai.com, chatgpt.com and muse.ai. You may create a new tunnel, a restricted API key, a ChatGPT plugin, install the connector on my Muse VM, and approve this setup's own approval cards. When the key form is filled, tell me and I will click Create and Copy; do everything else yourself through the final verification, then report PASS/BLOCKED per step.
+> Use the muse-chatgpt-setup skill in semi-automatic key mode to connect my ChatGPT and Muse. My Chrome (remote debugging on) is signed in to platform.openai.com, chatgpt.com and muse.ai. You may create a new tunnel, a restricted API key, a ChatGPT plugin, install the connector on my Muse VM, and approve this setup's own approval cards. When the key form is filled, tell me and I will click Create and Copy; do everything else yourself through the final verification, then report PASS/BLOCKED per step.
 
 **全自动**——全程不问，只在登录、验证码、付款时停下：
 
-> 用 muse-chatgpt-setup 技能，全自动把我的 ChatGPT 和 Muse 连起来。我在 http://127.0.0.1:9333 的 Chrome 已登录 platform.openai.com、chatgpt.com 和 muse.ai。我授权你新建隧道、受限 API Key（仅 Tunnels 读取 + 使用，30 天）和 ChatGPT 插件，在我的 Muse VM 上安装连接器，并批准本流程自己的审批卡。全程不要问我；只有需要登录、验证码或付款时才停下。最后按步骤报告 PASS/BLOCKED。
+> 用 muse-chatgpt-setup 技能，全自动把我的 ChatGPT 和 Muse 连起来。我的 Chrome 已打开远程调试，并已登录 platform.openai.com、chatgpt.com 和 muse.ai。我授权你新建隧道、受限 API Key（仅 Tunnels 读取 + 使用，30 天）和 ChatGPT 插件，在我的 Muse VM 上安装连接器，并批准本流程自己的审批卡。全程不要问我；只有需要登录、验证码或付款时才停下。最后按步骤报告 PASS/BLOCKED。
 
-> Use the muse-chatgpt-setup skill in fully automatic mode to connect my ChatGPT and Muse. My Chrome at http://127.0.0.1:9333 is signed in to platform.openai.com, chatgpt.com and muse.ai. I authorize you to create a new tunnel, a restricted API key (Tunnels Read + Use, 30 days), and a ChatGPT plugin, to install the connector on my Muse VM, and to approve this setup's own approval cards. Do not ask me anything; stop only if a login, CAPTCHA or payment is needed. Report PASS/BLOCKED per step at the end.
+> Use the muse-chatgpt-setup skill in fully automatic mode to connect my ChatGPT and Muse. My Chrome (remote debugging on) is signed in to platform.openai.com, chatgpt.com and muse.ai. I authorize you to create a new tunnel, a restricted API key (Tunnels Read + Use, 30 days), and a ChatGPT plugin, to install the connector on my Muse VM, and to approve this setup's own approval cards. Do not ask me anything; stop only if a login, CAPTCHA or payment is needed. Report PASS/BLOCKED per step at the end.
 
 ## 安全
 

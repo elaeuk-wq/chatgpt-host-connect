@@ -12,8 +12,7 @@ Target: about 5-6 minutes on a first run, most of it the Muse agent installing. 
 
 ## Requirements
 
-- A Chrome reachable over CDP (default `http://127.0.0.1:9333`, override `--cdp` or `MUSE_SETUP_CDP`), signed in to platform.openai.com, chatgpt.com and muse.ai. Chrome 136+ only allows remote debugging on a non-default profile:
-  `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9333 --user-data-dir="$HOME/.muse-chatgpt-setup/chrome"`
+- A Chrome reachable over CDP, signed in to platform.openai.com, chatgpt.com and muse.ai. Default `--cdp auto`: the everyday Chrome with `chrome://inspect/#remote-debugging` switched on (found via its `DevToolsActivePort` file; the user clicks **Allow** once on Chrome's prompt — if the run says `waiting for Chrome`, tell the user to click it). Override with `--cdp ws://…`, `--cdp http://host:port` (a separate profile started with `--remote-debugging-port` and `--user-data-dir`) or `MUSE_SETUP_CDP`.
 - Node >= 22 on the machine running the agent. Semi-automatic key mode also needs macOS `pbpaste`/`pbcopy`.
 - The OpenAI account may create tunnels and API keys; the Muse VM has `curl` and `python3`.
 

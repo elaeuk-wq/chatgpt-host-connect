@@ -2,7 +2,7 @@
 // muse-setup.mjs - drive a signed-in Chrome (over CDP) through the whole
 // ChatGPT <-> Muse setup. Node >= 22, no dependencies.
 //
-//   node muse-setup.mjs run [--mode auto|manual] [--cdp http://127.0.0.1:9333]
+//   node muse-setup.mjs run [--mode auto|manual] [--cdp auto|ws://...|http://host:port]
 //   node muse-setup.mjs run --dry-run            # locate elements only, no clicks
 //   node muse-setup.mjs run --from-step plugin   # resume after a manual fix
 //   node muse-setup.mjs state show|done|set|reset ...
@@ -52,7 +52,7 @@ const RAW = `https://raw.githubusercontent.com/elaeuk-wq/muse-chatgpt-setup-skil
 const HOME_DIR = path.join(os.homedir(), '.muse-chatgpt-setup');
 const STATE_FILE = path.resolve(opts.state || path.join(HOME_DIR, 'state.json'));
 const DATA_DIR = path.dirname(STATE_FILE);
-const CDP = opts.cdp || process.env.MUSE_SETUP_CDP || 'http://127.0.0.1:9333';
+const CDP = opts.cdp || process.env.MUSE_SETUP_CDP || 'auto';
 const URLS = {
   platform: (opts['platform-url'] || 'https://platform.openai.com').replace(/\/+$/, ''),
   muse: (opts['muse-url'] || 'https://muse.ai').replace(/\/+$/, ''),

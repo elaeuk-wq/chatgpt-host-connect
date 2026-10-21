@@ -20,22 +20,65 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export { sleep };
 
 // ---------------------------------------------------------------- browser
-export async function connect(endpoint) {
-  const base = endpoint.replace(/\/+$/, '');
-  let ver;
+// Profile dirs whose DevToolsActivePort is written when remote debugging is
+// switched on from chrome://inspect/#remote-debugging (the everyday profile).
+function activePortFiles() {
+  const home = process.env.HOME || '';
+  const mac = `${home}/Library/Application Support`;
+  const linux = `${home}/.config`;
+  return [
+    `${mac}/Google/Chrome`, `${mac}/Google/Chrome Beta`, `${mac}/Google/Chrome Canary`, `${mac}/Chromium`,
+    `${linux}/google-chrome`, `${linux}/google-chrome-beta`, `${linux}/chromium`,
+  ].map((d) => `${d}/DevToolsActivePort`);
+}
+
+async function wsFromActivePort() {
+  const { readFile } = await import('node:fs/promises');
+  for (const f of activePortFiles()) {
+    try {
+      const [port, path] = (await readFile(f, 'utf8')).split('\n').map((s) => s.trim());
+      if (port && path) return `ws://127.0.0.1:${port}${path}`;
+    } catch { /* not this profile */ }
+  }
+  return null;
+}
+
+async function wsFromHttp(base) {
   try {
     const res = await fetch(base + '/json/version');
-    ver = await res.json();
-  } catch (e) {
-    throw new StepError(`cannot reach the Chrome DevTools endpoint ${base} (${e.message})`, {
-      expected: 'a Chrome started with --remote-debugging-port and a signed-in profile',
+    return (await res.json()).webSocketDebuggerUrl;
+  } catch {
+    return null;
+  }
+}
+
+// endpoint: "auto" (default), "ws://..." or "http://host:port".
+// auto = the everyday Chrome's DevToolsActivePort, then http://127.0.0.1:9222.
+export async function connect(endpoint = 'auto') {
+  const base = endpoint.replace(/\/+$/, '');
+  let url = null;
+  if (base.startsWith('ws')) url = base;
+  else if (base === 'auto') url = (await wsFromActivePort()) || (await wsFromHttp('http://127.0.0.1:9222'));
+  else url = await wsFromHttp(base);
+  if (!url) {
+    throw new StepError(`cannot find a Chrome DevTools endpoint (${base})`, {
+      expected: 'remote debugging on: chrome://inspect/#remote-debugging in the signed-in Chrome, ' +
+        'or a Chrome started with --remote-debugging-port and its own --user-data-dir',
     });
   }
-  const ws = new WebSocket(ver.webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', resolve, { once: true });
-    ws.addEventListener('error', () => reject(new StepError(`websocket to ${base} failed`)), { once: true });
-  });
+  // The everyday profile asks the user to allow the connection; this can take a while.
+  const hint = setTimeout(() => process.stderr.write('waiting for Chrome: click "Allow" on the remote-debugging prompt\n'), 3000);
+  const ws = new WebSocket(url);
+  try {
+    await new Promise((resolve, reject) => {
+      ws.addEventListener('open', resolve, { once: true });
+      ws.addEventListener('error', () => reject(new StepError(`websocket to ${url.replace(/\/devtools\/.*/, '')} failed`, {
+        expected: 'the user clicks Allow on Chrome\'s remote-debugging prompt',
+      })), { once: true });
+    });
+  } finally {
+    clearTimeout(hint);
+  }
   return new Browser(ws);
 }
 

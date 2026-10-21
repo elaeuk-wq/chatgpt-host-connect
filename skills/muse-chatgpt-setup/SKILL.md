@@ -110,6 +110,22 @@ Rules:
 - Ports are auto-picked, so an existing service on 8795/8796 cannot collide. Nothing outside `~/muse-chatgpt` and the two units this script creates is touched.
 - The self-test payload must return hostname, a fresh timestamp and the caller token — that is the B-level evidence.
 
+### Gate: do not build the connector until the tunnel is actually connected
+
+`install.sh` ends with a verdict and **exits 2** when it is not met:
+
+```
+control-plane  : OK                      # a poll reached OpenAI - proceed
+control-plane  : PENDING (...)           # approve egress, re-run restore.sh
+control-plane  : KEY REJECTED            # wrong/revoked/insufficient key
+```
+
+`/healthz` and `/readyz` do **not** count — they are local to the process and stay green while every poll times out.
+
+If PENDING: the approval card is waiting (sidebar **需要审核**). Click **更多允许选项 → 总是允许此站点** (host does this, §0.6), then `bash ~/muse-chatgpt/restore.sh` and re-check. Only continue to step 3 once it prints `OK`.
+
+**Never** create the connector before this gate passes. Doing so produces a misleading `应用配置受到速率限制` error from ChatGPT, and a connector that silently never works.
+
 ## 3. ChatGPT: connector
 
 1. https://chatgpt.com/plugins → **添加** → **添加自定义 MCP 服务器**.

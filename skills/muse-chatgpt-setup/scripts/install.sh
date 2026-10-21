@@ -196,15 +196,41 @@ else
 fi
 
 # ---------- verify ----------
-say "waiting for tunnel readiness"
-OK=0
-for i in $(seq 1 40); do
-  if curl -fsS "http://127.0.0.1:$HEALTH_PORT/readyz" >/tmp/_ready.$$ 2>/dev/null; then OK=1; break; fi
-  sleep 1
+# /healthz and /readyz are local to this process. They say NOTHING about the
+# control plane: a tunnel whose egress is blocked (pending user approval) is
+# still "live" and "ready" locally while every poll times out. Only a
+# successful poll proves the link, so check for that explicitly.
+say "waiting for a successful control-plane poll (up to 90s)"
+LOG=""
+if [ "$USE_SYSTEMD" = 1 ]; then
+  LOG_CMD="journalctl -u $UNIT_TUN --since '-3 min' --no-pager"
+else
+  LOG_CMD="cat $DIR/logs/tunnel.log"
+fi
+CONNECTED=0
+for i in $(seq 1 45); do
+  OUT="$(eval "$LOG_CMD" 2>/dev/null || true)"
+  if printf '%s' "$OUT" | grep -qiE 'poller recovered|polling operational'; then CONNECTED=1; break; fi
+  if printf '%s' "$OUT" | grep -qiE 'invalid_api_key|status=401|401 Unauthorized|Unauthorized'; then
+    say "control-plane: KEY REJECTED (invalid_api_key)"
+    break
+  fi
+  sleep 2
 done
+
+if [ "$CONNECTED" = "1" ]; then
+  say "control-plane: OK (a poll succeeded)"
+else
+  say "control-plane: PENDING - the tunnel is up but has not reached OpenAI yet."
+  say "  This is almost always the egress approval card in the Muse/agent UI,"
+  say "  not a bug in this script. Action: approve it with 'always allow this site'"
+  say "  (允许一次 is a split button - the caret offers 总是允许此站点), then re-run:"
+  say "    bash $DIR/restore.sh"
+  say "  Do NOT create the ChatGPT connector until this line says OK."
+fi
+
 say "healthz: $(curl -fsS "http://127.0.0.1:$HEALTH_PORT/healthz" 2>/dev/null || echo unavailable)"
-say "readyz:  $(cat /tmp/_ready.$$ 2>/dev/null || echo unavailable)"
-rm -f /tmp/_ready.$$
+say "readyz:  $(curl -fsS "http://127.0.0.1:$HEALTH_PORT/readyz" 2>/dev/null || echo unavailable)   (local only - not proof of connectivity)"
 say "mcp:     $(curl -fsS "http://127.0.0.1:$MCP_PORT/healthz" 2>/dev/null || echo unavailable)"
 
 cat <<EOF
@@ -215,7 +241,9 @@ mode           : $([ "$USE_SYSTEMD" = 1 ] && echo systemd || echo nohup)
 mcp            : 127.0.0.1:$MCP_PORT
 tunnel health  : 127.0.0.1:$HEALTH_PORT
 tunnel id      : $TUNNEL_ID
-ready          : $([ "$OK" = 1 ] && echo yes || echo NO)
+control-plane  : $([ "$CONNECTED" = 1 ] && echo OK || echo "PENDING (approve egress, then re-run restore.sh)")
 restore after VM rebuild: bash $DIR/restore.sh
 ----------------------------------------
 EOF
+
+[ "$CONNECTED" = "1" ] || exit 2

@@ -1,66 +1,71 @@
-# Paste-ready messages
+# Messages for the Muse agent
 
-Three messages total. Replace `TUNNEL_ID` before sending. **No key ever appears in message text** — it travels as a file attachment only.
+`muse-setup.mjs` sends these itself. `node scripts/browser/muse-setup.mjs message install|restore|logs`
+prints them with this run's values, for sending by hand during a takeover.
 
-These assume the target VM is a **fresh machine**: no tunnel client, no MCP server, no systemd units, no previous run. The repo ships everything needed, so nobody has to improvise code on the fly.
-
----
-
-## Message 1 — install (send right after the tunnel exists)
-
-> 帮我在这台机器上装一条到 ChatGPT 的连接。**假设这台机器什么都没有**（没有 tunnel-client、没有 MCP 服务、没有任何相关服务），一切从零装，只装在我自己的目录里。
->
-> Tunnel ID：`TUNNEL_ID`
->
-> 执行这三条，不要改脚本内容、不要自己重写实现：
->
-> ```bash
-> mkdir -p ~/muse-chatgpt && cd ~/muse-chatgpt
-> curl -fsSL https://raw.githubusercontent.com/elaeuk-wq/muse-chatgpt-setup-skill/main/skills/muse-chatgpt-setup/scripts/install.sh -o install.sh
-> curl -fsSL https://raw.githubusercontent.com/elaeuk-wq/muse-chatgpt-setup-skill/main/skills/muse-chatgpt-setup/scripts/muse-mcp.py -o muse-mcp.py
-> TUNNEL_ID=TUNNEL_ID KEY_FILE=~/run/control-plane.env bash install.sh
-> ```
->
-> 说明：
-> - `install.sh` 会自己下载官方 tunnel-client、自动挑空闲端口、写两个 systemd 服务（没有 systemd 时退回 nohup）、生成 `restore.sh`。
-> - 密钥文件 `~/run/control-plane.env` 我稍后单独给你（**不在聊天里发**），内容一行 `CONTROL_PLANE_API_KEY=...`。没有它就先别跑，等我。
-> - 启动顺序脚本里已处理：先 MCP、等端口可连、再 tunnel。别自己改顺序。
-> - 日志带 UTC 时间戳，输出在 `journalctl -u muse-mcp -u muse-tunnel` 或 `~/muse-chatgpt/logs/`。
->
-> 装完只回报：脚本最后的 report 段、两个服务的状态、`curl -fsS 127.0.0.1:<health>/readyz` 的结果。不要输出任何密钥。
+Rules for all of them: the key travels only as an **attached file**, never in message text; scripts
+are fetched from the release tag `v1.0.0`, not from `main`; the Muse agent runs them unchanged.
 
 ---
 
-## Message 2 — key handoff (attach the env file with this message)
+## Install (attach the key file to this message)
 
-> 附件是受限 Key（Tunnels Read+Use，30 天）。请：
-> 1. 把它保存为 `~/run/control-plane.env`（0600）。
-> 2. 跑 `bash ~/muse-chatgpt/restore.sh` 让两个服务按正确顺序起来。
-> 3. 回报 `readyz` 结果与服务 PID；只贴 Key 的 SHA256 前 8 位，不回显完整值。
-> 4. 对该附件做零覆写后删除。
+Replace `TUNNEL_ID`; attach `control-plane-key-<run>.txt` (one line `CONTROL_PLANE_API_KEY=sk-...`).
 
----
+```text
+请在这台机器上安装一条到 ChatGPT 的连接，全部装在 ~/muse-chatgpt，不要动其他服务。
 
-## Message 3 — diagnosis (only when something is wrong)
+附件 control-plane-key-<run>.txt 是 API Key 文件：不要打开、不要打印或复述它的内容。先找到它在这台机器上的路径，记为 KEY_PATH。
 
-> 只回报事实，不要改配置：
-> 1. `systemctl is-active muse-mcp muse-tunnel` + 各自 PID 与启动时间（没有 systemd 就报 `ps` 与 pid 文件）。
-> 2. `journalctl -u muse-tunnel --since "-10 min"` 里有没有 `dispatcher forwarded`？有没有 `unexpected EOF` / `proxyconnect`？
-> 3. `journalctl -u muse-mcp --since "-10 min"` 里的请求行。
-> 4. `curl -fsS 127.0.0.1:<health>/readyz` 与 `/healthz` 的结果。
-> 5. 如果这台机器换过机（`uptime -s` 很新），直接说，别猜。
+然后原样执行（不要改脚本，不要自己重写实现）：
 
----
+mkdir -p ~/muse-chatgpt && cd ~/muse-chatgpt
+curl -fsSL https://raw.githubusercontent.com/elaeuk-wq/muse-chatgpt-setup-skill/v1.0.0/skills/muse-chatgpt-setup/scripts/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/elaeuk-wq/muse-chatgpt-setup-skill/v1.0.0/skills/muse-chatgpt-setup/scripts/muse-mcp.py -o muse-mcp.py
+TUNNEL_ID=TUNNEL_ID KEY_FILE="$KEY_PATH" CONSUME_KEY_FILE=1 bash install.sh
 
-## Approvals: auto-clicked by the host, no asking
+如果弹出允许访问 api.openai.com 的审批，选长期允许。
+装完只回复脚本最后 report 段的原文（两条横线之间的内容），不要输出任何密钥。
+```
 
-Every long step must run the approval pump (SKILL.md §0.6): every ~5 s look for
-a card, open it if it is collapsed (**审核** / sidebar **需要审核**), and click the
-longest-lived option — `更多允许选项` caret → **总是允许此站点**, else **始终允许**,
-else **允许一次**. For the connector, click **连接 <name>**.
+`CONSUME_KEY_FILE=1` makes `install.sh` copy the key into `~/muse-chatgpt/run/control-plane.env`
+(0600), then overwrite and delete the attachment. Without a key the script still installs
+everything, prints `KEY MISSING` and exits 3; the key can follow with the rotate message.
 
-Verify: the pending badge disappears and 审核记录 shows `始终允许网站`. Then keep
-polling the page.
+## Restart after approving egress, or after a VM swap
 
-Never auto-click: password / MFA / CAPTCHA, payment or plan changes, or deletion of
-things the host did not create.
+```text
+审批已处理。请运行 bash ~/muse-chatgpt/restore.sh ，只回复 report 段原文。
+```
+
+## Rotate the key (attach the new key file)
+
+```text
+附件是新的 API Key 文件，不要打开或打印它。找到它的路径记为 KEY_PATH，然后运行：
+KEY_FILE="$KEY_PATH" CONSUME_KEY_FILE=1 bash ~/muse-chatgpt/restore.sh
+只回复 report 段原文。
+```
+
+Revoke the old key on Platform only after this report says OK.
+
+## Two-sided log check
+
+```text
+只回报事实，不要改任何配置。运行下面两条命令并原样贴出输出：
+
+{ grep -h 'dispatcher forwarded' ~/muse-chatgpt/logs/tunnel.log 2>/dev/null; journalctl -u muse-chatgpt-tunnel.service --since '-30 min' -o cat --no-pager 2>/dev/null | grep 'dispatcher forwarded'; } | tail -4
+{ grep -h 'tools/call' ~/muse-chatgpt/logs/mcp.log 2>/dev/null; journalctl -u muse-chatgpt-mcp.service --since '-30 min' -o cat --no-pager 2>/dev/null | grep 'tools/call'; } | tail -4
+```
+
+Expect `dispatcher forwarded command to MCP server` lines carrying this run's `tunnel_id`, and
+`rpc method=tools/call tool=muse_vm_exec` lines at the same times as the ChatGPT calls.
+
+## Diagnosis (only when something is wrong)
+
+```text
+只回报事实，不要改配置：
+1. cat ~/muse-chatgpt/run/config.env；ps -p $(cat ~/muse-chatgpt/run/mcp.pid ~/muse-chatgpt/run/tunnel.pid) -o pid,lstart,command（systemd 时改为 systemctl status muse-chatgpt-mcp muse-chatgpt-tunnel --no-pager）
+2. tail -20 ~/muse-chatgpt/logs/tunnel.log（或 journalctl -u muse-chatgpt-tunnel --since "-10 min" -o cat）里有没有 poll failed / poll timed out / status_code / proxyconnect
+3. curl -s 127.0.0.1:<tunnel health 端口>/metrics | grep commands_poll_last_successful
+4. uptime -s：如果这台机器刚换过，直接说
+```

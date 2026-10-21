@@ -1,190 +1,136 @@
 ---
 name: muse-chatgpt-setup
-description: Wire an already signed-in ChatGPT account to an already signed-in Muse account over an OpenAI Secure MCP Tunnel, in about 15 minutes. Creates the tunnel and a restricted key, has Muse self-configure its own VM, connects the ChatGPT connector, and proves the link with two-sided logs. Use when the user says "connect ChatGPT and Muse" or wants ChatGPT to drive a Muse cloud VM.
+description: Connect an already signed-in ChatGPT account to an already signed-in Muse account over an OpenAI Secure MCP Tunnel, from one prompt. A script drives the user's signed-in Chrome over CDP - creates the tunnel and a restricted key on platform.openai.com, has Muse install the tunnel client on its own VM, creates the ChatGPT custom MCP plugin, and proves the link with two tool calls plus two-sided logs. Use when the user says "connect ChatGPT and Muse" or wants ChatGPT to call tools on a Muse VM.
 ---
 
-# Connect ChatGPT ↔ Muse (runbook)
+# Connect ChatGPT and Muse
 
-**What this delivers:** ChatGPT can call tools that really execute inside the user's Muse VM, and read the live results back (`B-level`).
-**What this does NOT deliver:** a conversation with the Muse agent (`A-level`). See **Limits**. Never describe B as A.
+**Delivers (B-level):** ChatGPT calls two tools that really run on the user's Muse VM and returns their live output: `muse_ping` and `muse_vm_exec` (one whitelisted command, `status_echo`: hostname, UTC time, echo token). This is a link test.
+**Does not deliver (A-level):** talking to the Muse agent. See Limits. Never report B as A.
 
-Target wall-clock: **12–18 min**, of which most is the remote agent working, not you clicking.
+Target: about 5-6 minutes on a first run, most of it the Muse agent installing. You run one command and handle only what it hands back.
 
-## Fast path (do these in order, don't improvise)
+## Requirements
 
-| # | Where | Action | ~time |
+- A Chrome reachable over CDP (default `http://127.0.0.1:9333`, override `--cdp` or `MUSE_SETUP_CDP`), signed in to platform.openai.com, chatgpt.com and muse.ai. Chrome 136+ only allows remote debugging on a non-default profile:
+  `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9333 --user-data-dir="$HOME/.muse-chatgpt-setup/chrome"`
+- Node >= 22 on the machine running the agent. Semi-automatic key mode also needs macOS `pbpaste`/`pbcopy`.
+- The OpenAI account may create tunnels and API keys; the Muse VM has `curl` and `python3`.
+
+## Authorization
+
+The user's prompt is the authorization. Whatever it grants (creating a tunnel, a key, a plugin, installing on the Muse VM, approving this flow's cards) you do without asking again. Always stop and hand over for: login, MFA/one-time codes, CAPTCHA, payment or plan changes, and anything that changes or deletes objects this run did not create (other tunnels, keys, plugins, services). If the prompt grants nothing, ask once, listing exactly what will be created.
+
+## Run
+
+```bash
+S=<this skill dir>/scripts/browser/muse-setup.mjs
+node $S run --mode auto          # fully automatic (default)
+node $S run --mode manual        # semi-automatic: the user clicks Create + Copy on the key
+node $S run --dry-run            # locate the entry elements on every site; clicks nothing
+```
+
+Options: `--workspace "<ChatGPT workspace>"` (needed only when several are offered), `--project "<Platform project>"`, `--keep-key` (keep the local key file after install), `--state FILE`, `--labels FILE` (extra UI labels).
+
+Key modes:
+
+- **auto**: the script submits the key form and reads the key from the *Save your key* dialog straight into a `0600` file. Never printed.
+- **manual**: the script fills the form (Restricted, Tunnels Read + Use, 30 days) and stops; it emits `waiting_for_user` - relay it. The user clicks **Create secret key** and **Copy**; the script writes the clipboard to the `0600` file and clears the clipboard. The script does not read the key from the page.
+
+Steps (each reads back what it set before it is marked done):
+
+| Step | Site | Does | Read back |
 |---|---|---|---|
-| 0 | browser | Open the user's **signed-in** Platform / ChatGPT / Muse tabs. No new accounts. | 1 min |
-| 1 | Platform | Create a **dedicated** tunnel + a **Restricted** key (Tunnels: Read + Use). | 3 min |
-| 2 | Muse | Paste **one** bootstrap message (below) — it does everything on its own VM. | 5–8 min |
-| 3 | ChatGPT | Add a custom MCP server → **隧道** → the new tunnel → unique name. | 2 min |
-| 4 | ChatGPT | Call a tool in a **new** chat; verify with **two-sided** logs. | 2 min |
+| `tunnel` | Platform | new tunnel with a unique name, ChatGPT workspace associated | `tunnel_…` id, name, workspace |
+| `key` | Platform | Restricted key: Tunnels Read + Use only, 30 days | permissions, expiry, project, list row |
+| `muse-install` | Muse | new chat, key file attached, install message sent | attachment chip, sent message |
+| `muse-wait` | Muse | approves the `api.openai.com` card, waits for the install report | `control-plane  : OK` |
+| `plugin` | ChatGPT | custom MCP server -> Tunnel -> chip -> No authentication -> Create -> Connect | selected chip = tunnel name, id field = tunnel id, listed + connected |
+| `test` | ChatGPT | two `muse_vm_exec` calls with fresh tokens | tokens echoed, two different UTC values |
+| `logs` | Muse | asks for the forwarded-command and MCP log lines | lines carry the tunnel id |
 
-Do steps 1 and 2 in parallel: the bootstrap message needs only the `tunnel_id`.
+Output: one JSON object per line on stdout; the last line is the result. Exit codes: `0` done, `10` a step failed (you take over), `11` the user is needed (login / captcha / payment), `12` refused because it could create a duplicate, `1` usage error.
 
-## Entry points (exactly these four)
+## When the script fails: take over, then resume
 
-| Step | URL | What you do there |
-|---|---|---|
-| 1a | https://platform.openai.com/settings/organization/tunnels | **Create tunnel**, then copy the `tunnel_…` id |
-| 1b | https://platform.openai.com/settings/organization/api-keys | **Create new secret key** → Restricted → Tunnels: Read + Use |
-| 2 | https://muse.ai/ | Send the install message; approval cards appear in the right sidebar |
-| 3 | https://chatgpt.com/plugins | **添加 → 添加自定义 MCP 服务器 → 连接: 隧道** |
-| later | https://chatgpt.com/settings/plugins-settings | Manage / uninstall the connector |
-
-In the connector's tunnel picker the chips show tunnel **names** (`muse-native-run3`), not ids — pick by name, then confirm the id landed in the `tunnel_...` field.
-
-## 0. Preflight (one message, not three)
-
-Send Muse **one** message asking all of this at once, so you never pay for a second round trip:
-
-> 请一次性回答（每条一行，不要反问我第二步）：① tunnel-client 是否已安装（路径 + `--version`）？② 有没有任何服务监听 `127.0.0.1:端口/mcp`？③ 你能否写文件到 `~/muse-chatgpt-tunnel/`？④ 你的 VM 出网是否要过出口代理审批（带 `Authorization` 的请求会不会被挂起）？⑤ 你能否用 systemd 起独立服务？
-
-If ② is "no", that is expected — the bootstrap creates one. Only ①③⑤ can actually block you.
-
-## 0.5 Approval gates — where they hide (the #1 reason a run appears "stuck")
-
-Nothing in this flow fails silently: it **waits**. If the remote agent stops producing output for ~30 s, the cause is almost always an unclicked approval, not a technical failure. Never sit and wait — go look, then tell the user exactly which button to press.
-
-| Gate | Where it appears | What to choose |
-|---|---|---|
-| Muse background task needs review | Right-hand sidebar **需要审核**, and a **审核** button above the composer | Open the card. For network access pick the long-lived option |
-| Egress proxy → `api.openai.com` | Same sidebar card: *允许 <agent> 与 api.openai.com 分享信息* | **允许一次 is not enough.** Click **更多允许选项** (the caret right of 允许一次) → **总是允许此站点**. The tunnel polls forever; a one-shot approval lets exactly one poll through and then stalls |
-| ChatGPT tool call | Inline card in the conversation | User's call; 「始终允许」 avoids a click per call |
-| ChatGPT connector consent | Consent screen after *创建为插件* | **连接 <name>** — without it `tools/list` returns `[]` |
-| Platform tunnel/key creation | No card | Requires being signed in with permission to create |
-
-The approval card is frequently **not** in the chat transcript — it lives in the sidebar panel, so a public-facing run must point at it explicitly (or click it once the user has pre-authorised). One observed stall lasted until the user manually clicked the card; the agent had been reporting "waiting" with no hint of what to click. Do not repeat that: name the panel, name the button.
-
-## 0.6 Auto-approve: the host clicks, without asking (default)
-
-**Never ask the user to approve, and never leave a run waiting on a card.** Poll for approval UI while the run is in progress and click it yourself. This is the default behaviour, not an opt-in.
-
-Run this loop alongside every long step (install, connector creation, tool calls):
-
-1. Every ~5 s, look for approval UI:
-   - Muse: right sidebar **需要审核** badge, and/or **审核** button above the composer → click it to open the card.
-   - ChatGPT: an inline card in the conversation with **允许 / 始终允许 / 允许一次**.
-2. Click the **longest-lived** option available, in this order of preference:
-   - `更多允许选项` (the caret next to 允许一次) → **总是允许此站点**
-   - **始终允许**
-   - **允许一次** / **允许**
-   - Muse connector consent: **连接 <name>**
-3. Confirm it took effect: the 需要审核 badge disappears and **审核记录** gains an entry (`始终允许网站`). Only then continue.
-
-Known labels observed in the wild (match by position/role when the wording differs): `允许`, `允许一次`, `更多允许选项`, `总是允许此站点`, `始终允许`, `审核`, `连接 <name>`.
-
-**Never click these — stop and hand over to the user:**
-
-- credential entry: password, MFA/one-time code, CAPTCHA (the host has no credentials to type)
-- payment, plan upgrade, billing
-- destructive actions on services, tunnels, connectors or data that the host did not create
-
-Everything else in this workflow is auto-clicked, including egress approval for `api.openai.com`.
-
-## 1. Platform: tunnel + restricted key
-
-Everything here is **per account**: tunnels and connectors are scoped to whichever OpenAI account/organization you are signed into. Two accounts can each own a tunnel called `aws` — that is not a sign you are in the same place, and you must not expect tunnels or connectors from another account to be visible. Build fresh in the account you are in; nothing else is required.
-
-1. https://platform.openai.com/settings/organization/tunnels → **Create tunnel**. Name it after the purpose (e.g. `muse-chatgpt-native`), pick the org, and select the user's ChatGPT workspace. Copy the `tunnel_…` id — it is not a secret.
-2. Never reuse a tunnel that already carries another service; if one exists (`aws`, etc.) leave it alone.
-3. **The tunnel must be associated with the target ChatGPT workspace**, or it will not appear at all in step 3. The Create dialog's workspace field is easy to miss and its markup differs per organization — if the dialog shows no `Search workspaces by name or ID` control, create anyway and then **Edit tunnel → ChatGPT workspaces → pick the workspace → Save**. Verify success by re-opening the connector dialog and confirming the tunnel name shows up as a chip; a tunnel that is org-scoped but workspace-less is invisible there and every later step is wasted.
-4. https://platform.openai.com/settings/organization/api-keys → **Create new secret key**:
-   - Name it distinctly (`…-runtime-2` on re-runs).
-   - Permissions → **Restricted** → set **Tunnels = Read + Use**, nothing else.
-   - Expiry → 30 days (avoid "never").
-   - The key is shown **once**, in a readonly `<input>` inside a *Save your key* dialog. Read it from the DOM into a local `0600` file **inside the same script**; never print it, never paste it into a chat message.
-   - Restricted keys are **org-scoped**: re-runs in the same org may reuse one key for several tunnels, but a different OpenAI account/organization needs its own key (and its own tunnel).
-5. If the Create button stays disabled, the **expiry** field is unfilled — that is the usual cause.
-
-## 2. Target machine: install from zero
-
-**Assume the machine is brand new**: no tunnel client, no MCP server, no units, no previous run. Do not ask the remote agent to write infrastructure from scratch — the repo ships it, so every user gets the same bytes:
-
-- `scripts/install.sh` — downloads the official `tunnel-client`, picks free ports, writes two units (systemd, or a `nohup` fallback), generates `restore.sh`, starts in the correct order, prints a report.
-- `scripts/muse-mcp.py` — a stdlib-only MCP server: `muse_ping` + `muse_vm_exec` (one whitelisted command, fixed argv, no shell), neutral tool descriptions, timestamped logs.
-
-Send `references/muse-bootstrap.md` **Message 1** (it fetches both files from this repo and runs one command). The only local prerequisites are `curl` and `python3`.
+1. Read the last JSON line: `step`, `error`, `expected`, `found` (only the relevant elements, redacted), `hint`, and `takeover` (`do`, `verify`, `record`, `resume`). The failing tab is left open.
+2. Do that one step by hand in the same browser, using the fallback tools (they use real mouse/keyboard and redact everything they print):
+   `snapshot`, `click`, `fill`, `select`, `attach`, `grep`, `press` - all take `--tab <url prefix>` and optional `--scope dialog`, e.g.
+   `node $S select --tab https://platform.openai.com --scope dialog --label "Expiration|有效期" --option "30 days|30 天"`.
+   For the key use `node $S key-from-page --tab https://platform.openai.com` while *Save your key* is open, or `key-from-clipboard` after the user clicked Copy. Never print, paste or type the key yourself.
+3. Check every `takeover.verify` condition on the page.
+4. Record the result: `takeover.record` (e.g. `node $S state done tunnel tunnel_id=tunnel_… tunnel_name=…`). `state done` validates the outputs.
+5. Resume: `node $S run` (finished steps are skipped). `--from-step <step>` re-runs from a later step.
 
 Rules:
 
-- **`--control-plane.api-key env:CONTROL_PLANE_API_KEY`** only; the key lives in a `0600` file that the unit sources. Never on a command line, never in a log, never in chat prose.
-- Key delivery: a **file attachment** (see Limits), saved to `~/run/control-plane.env`, attachment zero-overwritten afterwards.
-- Ports are auto-picked, so an existing service on 8795/8796 cannot collide. Nothing outside `~/muse-chatgpt` and the two units this script creates is touched.
-- The self-test payload must return hostname, a fresh timestamp and the caller token — that is the B-level evidence.
+- Never create a second tunnel, key or plugin to get past a failure. A step marked `submitted` is looked up by its name on rerun; if it cannot be found the script refuses (exit 12) - check the page yourself, then either record it with `state done` or, only if nothing was created, `state reset <step>`. `state reset key --rename` starts a key with a new name after you revoked the uncaptured one.
+- `needs_user` (exit 11): tell the user exactly what to do (e.g. sign in to chatgpt.com in that Chrome), then rerun.
+- If the same step also fails twice by hand, stop and tell the user which step, what you expected and what the page shows.
 
-### Gate: do not build the connector until the tunnel is actually connected
+## Approval cards
 
-`install.sh` ends with a verdict and **exits 2** when it is not met:
+The script approves only this flow's cards and reports the rest as `foreign_approval_left_for_user` - pass those on, do not click them.
 
-```
-control-plane  : OK                      # a poll reached OpenAI - proceed
-control-plane  : PENDING (...)           # approve egress, re-run restore.sh
-control-plane  : KEY REJECTED            # wrong/revoked/insufficient key
-```
+- Muse: the card for **api.openai.com** (egress of the tunnel client). Choose the long-lived option: the caret **More allow options -> Always allow this site**. *Allow once* lets one poll through and the tunnel stalls again.
+- ChatGPT: the tool card of this run's plugin (`muse_vm_exec` / `muse_ping`): **Always allow**.
 
-`/healthz` and `/readyz` do **not** count — they are local to the process and stay green while every poll times out.
+## UI labels (matched in both languages)
 
-If PENDING: the approval card is waiting (sidebar **需要审核**). Click **更多允许选项 → 总是允许此站点** (host does this, §0.6), then `bash ~/muse-chatgpt/restore.sh` and re-check. Only continue to step 3 once it prints `OK`.
+| Where | English | 中文 |
+|---|---|---|
+| Platform tunnels | Create tunnel · Name · Search workspaces by name or ID · Create · Edit · Save | 创建隧道 · 名称 · 按名称或 ID 搜索工作区 · 创建 · 编辑 · 保存 |
+| Platform keys | Create new secret key · Name · Project · Restricted · Tunnels · Read + Use · Expiration · 30 days · Create secret key · Save your key · Done | 创建新的密钥 · 名称 · 项目 · 受限 · 隧道 · 读取 + 使用 · 有效期 · 30 天 · 创建密钥 · 保存你的密钥 · 完成 |
+| Muse | New chat · Attach · Send · Needs review · Review · Allow once · More allow options · Always allow this site | 新对话 · 添加附件 · 发送 · 需要审核 · 审核 · 允许一次 · 更多允许选项 · 总是允许此站点 |
+| ChatGPT plugins | Add · Add custom MCP server · Connection · Tunnel · Authentication · No authentication · I understand and want to continue · Create · Connect <name> · Installed · Connected | 添加 · 添加自定义 MCP 服务器 · 连接 · 隧道 · 身份验证 · 无需身份验证 · 我已了解，并希望继续 · 创建为插件 · 连接 <name> · 已安装 · 已连接 |
+| ChatGPT chat | Send prompt · Always allow · Allow | 发送提示 · 始终允许 · 允许 |
 
-**Never** create the connector before this gate passes. Doing so produces a misleading `应用配置受到速率限制` error from ChatGPT, and a connector that silently never works.
+The full list is `scripts/browser/labels.mjs`. If the UI uses other words, pass `--labels my-labels.json` (same shape) rather than editing steps.
 
-## 3. ChatGPT: connector
+## On the Muse VM: install.sh
 
-1. https://chatgpt.com/plugins → **添加** → **添加自定义 MCP 服务器**.
-2. **连接** → **隧道** → pick the tunnel chip. **身份验证** → **无需身份验证** (the tunnel reports `SupportsOAuth:false`).
-3. Name: must be globally unique, and a name can be taken by an app you cannot even see → on `已存在同名应用`, just pick another (`Muse Native 2`).
-4. Tick **我已了解，并希望继续** → **创建为插件** → then the consent screen → **连接 <name>**. Creation alone is not connection.
-5. **"已安装" does not mean connected.** An app can appear under *已安装* with zero tools: tool discovery returns `[]` and the assistant says the tool does not exist. If the consent click was missed, reopen the app's detail page (`/plugins/plugin_…`) and press **连接** → then **连接 <name>** in the dialog. Only after that does `tools/list` return anything.
-6. **Never keep two connectors that expose the same tool names.** The model picks arbitrarily; you will "verify" the new path and actually hit the old one. Uninstall the stale connector first, or expect to prove attribution from the logs.
-5. Keep tool descriptions neutral from the first version (see Limits). A persuasive description produces a *suspicious instruction* warning on every call and costs the user a click each time.
+`references/muse-bootstrap.md` has the messages; `node $S message install|restore|logs` prints them with the real values. The install message downloads `install.sh` and `muse-mcp.py` from the release tag and runs one command; the key arrives as the attached file, never in message text.
 
-## 4. Prove it (two-sided, or it didn't happen)
+`install.sh` (same code path as the generated `restore.sh`):
 
-1. New chat, ask the model to call the exec tool with a **one-time random token** and to paste the raw JSON unchanged.
-2. Accept only: token echoed verbatim + a second call returning a **different** timestamp, **and** in the VM logs a `dispatcher forwarded … command` line whose `tunnel_id` matches, plus one MCP request line in the same second.
-   - Logs may be in **journald** rather than files: ask for `journalctl -u <unit> --since ...`. Do not conclude "no logs" because `tunnel.log` is absent.
-   - Read the tool schema instead of assuming parameter names: one implementation used `cmd`, another `command`, and payload shapes differed too.
-3. **Read the `tunnel_id` in the forwarded line.** With more than one tunnel alive it is the only proof of *which* path served the call — the assistant's own claim about which connector it used is not evidence.
-3. Second call must return a *different* UTC — proves it is not a constant.
-4. Rotate any key that ever appeared in plaintext, then re-run step 4 once with the new key. Revoke the old one only after the new call passes.
+- downloads the official `tunnel-client` for the VM's OS/CPU and checks it against the release `SHA256SUMS.txt`;
+- installs everything under `~/muse-chatgpt`; systemd units (`muse-chatgpt-mcp`, `muse-chatgpt-tunnel`, key via `EnvironmentFile=`) when root + systemd, otherwise background processes with pid files; it stops only its own processes and never overwrites units it did not write;
+- starts MCP first, waits for its port, then the tunnel;
+- judges the link by the tunnel's `commands_poll_last_successful_timestamp_seconds` metric (same as `tunnel-client health --require-control-plane-poll`), and reads logs only from this start;
+- prints a report ending in `control-plane  : OK | PENDING | KEY MISSING | KEY REJECTED | KEY FORBIDDEN | TUNNEL EXITED`; exit `0`, `2` pending, `3` key problem, `4` start failure.
 
-## Troubleshooting (symptom → cause → fix)
+`bash ~/muse-chatgpt/restore.sh` restarts after a VM swap; `KEY_FILE=<file> CONSUME_KEY_FILE=1 bash ~/muse-chatgpt/restore.sh` rotates the key; `restore.sh stop` stops both processes.
+
+Gate: never create the ChatGPT plugin before the report says OK - ChatGPT then shows a misleading rate-limit error and the plugin never works. The script enforces this.
+
+## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Connection timed out` | nothing listening upstream: VM was swapped, units gone | `restore.sh`; check `systemctl is-active` **before** every test |
-| `Connection timed out` right after a swap | old tunnel process still held the control plane while its VM was dying | restart tunnel, confirm a fresh `mcp session initialized` |
-| `Session terminated` | MCP restarted while the tunnel kept the old session | restart **MCP → wait for port → tunnel** |
-| `/readyz` 503 but poll OK | tunnel started ~40 ms before MCP bound its port; failed discovery cached | serial start order |
-| Tool "does not exist" although the server lists it | connector cached tools+descriptions at discovery | create a **new** connector (not 刷新工具, not a tunnel restart) |
-| Every call prompts for approval | per-connector permission is one-shot | user picks **Always allow** |
-| Suspicious-instruction warning | tool description argues it is harmless | reword to facts only, then new connector |
-| Tool discovery returns `[]` / "tool does not exist" on a brand-new connector | consent dialog never confirmed — *已安装* ≠ *已连接* | open the app page → **连接** → **连接 <name>** |
-| New tunnel missing from the connector's tunnel chips | tunnel not associated with the ChatGPT workspace | **Edit tunnel → ChatGPT workspaces → Save**, re-check the chips |
-| "No logs at all" | service logs to journald, not to a file | `journalctl -u <unit> --since "-10 min"` |
-| Agent stalls with no output | an approval card is waiting in the sidebar | open **需要审核**; for egress use 更多允许选项 → 总是允许此站点 |
-| `/healthz` and `/readyz` both green, yet nothing works | those endpoints are **local only**; the control-plane poll can still be timing out | look for `poller recovered` / a successful poll in the tunnel log before believing it |
-| ChatGPT says *应用配置受到速率限制* | in practice this fired while the tunnel was **not** connected | confirm the tunnel polls successfully, then retry creation |
-| Connector is missing from *已安装* although you clicked create | the consent step never completed (or creation was rejected) | re-create once the tunnel is up, click **连接 <name>**, then confirm it is listed |
-| Tool card appears only *after* the answer starts streaming | the pump stopped too early | keep polling until the answer text is on screen, not for a fixed duration |
-| A second install into the same directory silently repointed the old connector | one install dir = one live tunnel binding | after re-installing, uninstall the previous connector and delete its tunnel/key |
-| Tunnel stalls again an hour later | egress approval was one-shot, not always-allow | re-approve with 总是允许此站点 |
-| PASS claimed but the old tunnel served the call | two connectors, identical tool names | uninstall the stale one; confirm `tunnel_id` in the forwarded log line |
-| Poll fails, VM network fine | egress proxy stalls `Authorization` requests until approved | approve with **Always allow** |
+| Report `PENDING` | egress card for api.openai.com not approved, or approved only once | approve with Always allow this site, then `restore.sh` (the script asks Muse once by itself) |
+| Report `KEY REJECTED` / `KEY FORBIDDEN` | wrong or revoked key / key lacks Tunnels Read + Use or is from another organization | new key (`state reset key --rename`), then rotate with `restore.sh` |
+| New tunnel missing from the plugin's tunnel chips | tunnel not associated with the ChatGPT workspace | Platform: Edit tunnel -> ChatGPT workspaces -> Save |
+| ChatGPT: *rate limited* while creating the plugin | in practice: the tunnel was not polling | get `control-plane  : OK` first |
+| Plugin listed but tools are `[]` / "tool does not exist" | consent (**Connect <name>**) never confirmed | open the plugin page -> Connect -> Connect <name> |
+| Tool missing although the server lists it | the plugin cached tools and descriptions at discovery | create a new plugin; *refresh tools* does not help |
+| `Connection timed out` | VM was replaced, processes gone | `bash ~/muse-chatgpt/restore.sh` |
+| `Session terminated` | MCP restarted while the tunnel held the old session | `restore.sh` (restarts MCP, then tunnel) |
+| `/healthz` and `/readyz` green, nothing works | they are local; the control-plane poll can still fail | trust only the report verdict |
+| "No logs" | systemd mode logs to journald | `journalctl -u muse-chatgpt-tunnel --since "-10 min"` |
+| Passed, but an old tunnel answered | two plugins with the same tool names | uninstall the stale plugin; check `tunnel_id` in the forwarded log line |
+| Every call asks for approval / *suspicious instruction* warning | one-shot permission / tool description that argues it is harmless | Always allow; keep descriptions factual (this server's are) |
 
-## Limits — state these up front
+## Limits
 
-- **`A-level` (talk to the Muse agent) is usually impossible.** On the observed platform, the agent runtime exposes only internal Unix sockets that reject general HTTP (`noded/http-api.sock` resets), a sandbox API returning 403 route-not-allowed, and `privsep/*-mcp.sock` bridges that point the *other* way (agent → third-party tools). There is no "deliver a message → agent turn → return its answer" interface. Do not simulate it; report it.
-- **A minimal stand-in MCP is not the product.** If the intended gateway repo is unavailable, the agent may write a small server with 2–4 tools. That is a legitimate link test and must be labelled as a stand-in, never as the full toolset.
-- **There is no "usable but unreadable" secret channel here.** Chat attachments are ordinary readable files; an opaque vault cannot export into a process env. So: attachment delivery + Restricted + 30-day + rotate after first PASS.
-- **The VM is disposable.** Three replacements were observed in one evening; `/etc` units vanish, `$HOME` survives. `restore.sh` in `$HOME` is mandatory, not nice-to-have.
+- **A-level is not available.** The observed Muse runtime exposes no "deliver a message to the agent and return its answer" interface (internal sockets reject HTTP, the sandbox API returns 403, the MCP bridges point agent -> tools). Do not simulate it; report it as NOT VERIFIED.
+- **The VM side is a link test**, not a toolset: two tools, one fixed command, no shell. Say so when reporting.
+- **No usable-but-unreadable secret channel exists here.** The attachment is an ordinary file on the Muse VM; the Muse agent could read it. Hence Restricted (Tunnels only), 30 days, and rotation via `restore.sh`.
+- **The VM is disposable.** Units under `/etc` can vanish with the VM; `~/muse-chatgpt` survives, so `restore.sh` lives there.
 
 ## Hard rules
 
-- Ask before creating a tunnel/key, deploying a service, or connecting an app. Pause for the user's own login, MFA, and permission cards.
-- Never put a key, cookie or token in chat prose, URLs, command lines, screenshots or logs.
-- Never touch the user's existing tunnels, connectors, Pi/Browser MCP services or accounts.
-- Report `PASS` / `BLOCKED` / `NOT VERIFIED` per item, naming the level (A or B). A healthy tunnel alone is not a PASS.
+- Never put a key, cookie or token in chat text, URLs, command lines, screenshots or logs. Read pages only through the script and its fallback tools - never dump whole pages.
+- Use only objects this run created (unique names); never modify or delete the user's other tunnels, keys, plugins or VM services.
+- Report `PASS` / `BLOCKED` / `NOT VERIFIED` per step and name the level (B). A healthy tunnel alone is not a PASS: it needs both tool calls and the forwarded log lines with this tunnel's id.
 
-Official transport reference: https://developers.openai.com/api/docs/guides/secure-mcp-tunnels
+Transport reference: https://developers.openai.com/api/docs/guides/secure-mcp-tunnels

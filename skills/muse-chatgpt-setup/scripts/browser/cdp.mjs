@@ -715,6 +715,41 @@ export class Page {
     await this.send('DOM.setFileInputFiles', { files, backendNodeId });
   }
 
+  // Some sites (Muse) ignore files set through CDP: the message is then never
+  // delivered. This goes through the real macOS open panel instead: focus the
+  // file input, press Return for real (System Events) to open the panel, paste
+  // the path into Go to Folder, confirm. Needs Accessibility for the terminal.
+  async nativeFiles(file, { inputSpec, what = 'attachment' } = {}) {
+    const { execFileSync } = await import('node:child_process');
+    const osa = (script) => execFileSync('osascript', ['-e', script], { encoding: 'utf8' }).trim();
+    const sheets = () => Number(osa('tell application "System Events" to tell process "Google Chrome" to return count of sheets of window 1') || 0);
+    const key = (code, mods = '') => osa(`tell application "System Events" to key code ${code}${mods ? ` using {${mods}}` : ''}`);
+    const inputs = await this.find({ css: 'input[type=file]', text: [], hidden: true, ...(inputSpec || {}) });
+    if (!inputs.length) throw new StepError('no file input on the page', { expected: what, found: await this.snapshot({}) });
+    await this.send('Page.setInterceptFileChooserDialog', { enabled: false });
+    await this.b.send('Target.activateTarget', { targetId: this.targetId });
+    osa('tell application "Google Chrome" to activate');
+    await sleep(500);
+    await this.focus(inputs[inputs.length - 1].id);
+    key(36); // Return on the focused input opens the panel
+    if (!(await this.waitFor(async () => sheets() > 0, { timeout: 5000, interval: 300 }))) {
+      throw new StepError('the file panel did not open', { expected: 'a macOS open panel on the Chrome window', hint: 'Accessibility permission for this terminal (System Settings > Privacy & Security > Accessibility)' });
+    }
+    let saved = null;
+    try { saved = execFileSync('pbpaste', { encoding: 'utf8' }); } catch { /* empty clipboard */ }
+    try {
+      execFileSync('pbcopy', { input: file });
+      key(5, 'command down, shift down'); // Cmd+Shift+G: Go to Folder
+      await sleep(1000);
+      key(9, 'command down'); // Cmd+V
+      await sleep(600);
+      for (let i = 0; i < 3 && sheets() > 0; i++) { key(36); await sleep(1200); }
+    } finally {
+      try { execFileSync('pbcopy', { input: saved ?? '' }); } catch { /* ignore */ }
+    }
+    if (sheets() > 0) { key(53); throw new StepError('file panel did not accept the path', { expected: file }); }
+  }
+
   async backendId(mcsId) {
     const r = await this.send('Runtime.evaluate', { expression: `document.querySelector('[data-mcs="${mcsId}"]')` });
     const d = await this.send('DOM.describeNode', { objectId: r.result.objectId });

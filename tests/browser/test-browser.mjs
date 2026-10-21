@@ -47,7 +47,7 @@ for (let i = 0; i < 60; i++) { try { await fetch(`http://127.0.0.1:${CDP}/json/v
 let ALL_OUT = '';
 function cli(stateFile, ...args) {
   const r = spawnSync(process.execPath, [CLI, ...args, '--state', stateFile, '--cdp', `http://127.0.0.1:${CDP}`,
-    '--platform-url', `${FXURL}/platform`, '--muse-url', `${FXURL}/muse`, '--chatgpt-url', `${FXURL}/chatgpt`, '--timeout-scale', '0.4'], { encoding: 'utf8', timeout: 240000 });
+    '--platform-url', `${FXURL}/platform`, '--muse-url', `${FXURL}/muse`, '--chatgpt-url', `${FXURL}/chatgpt`, '--timeout-scale', '0.4', '--cdp-files'], { encoding: 'utf8', timeout: 240000 });
   ALL_OUT += r.stdout + r.stderr;
   const lines = r.stdout.trim().split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return { raw: l }; } });
   return { code: r.status, lines, last: lines[lines.length - 1] || {}, stderr: r.stderr };

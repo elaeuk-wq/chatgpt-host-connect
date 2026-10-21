@@ -674,7 +674,10 @@ async function stepMuseInstall(c) {
   if (nc) await page.click(nc.id, { settle: 800 });
   const comp = await composer(page, 'muse');
   await museConnected(page);
-  await page.setFiles([c.state.key_file], { buttonSpec: { text: L.muse.attach, exclude: '[role=dialog]' }, what: 'attach button' });
+  // Muse drops messages whose file was set over CDP; use the real open panel
+  // (--cdp-files only for the offline fixtures, which have no macOS panel).
+  if (opts['cdp-files']) await page.setFiles([c.state.key_file], { buttonSpec: { text: L.muse.attach, exclude: '[role=dialog]' }, what: 'attach button' });
+  else await page.nativeFiles(c.state.key_file, { what: 'Muse attachment' });
   const base = path.basename(c.state.key_file);
   // Muse renders the name as two spans ("control-plane-key-…" + ".txt"): match the stem.
   const stem = base.replace(/\.[^.]+$/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1141,7 +1144,7 @@ async function toolCmd() {
     else if (cmd === 'click') res = await page.click({ scope, text: split(opts.text), css: opts.css }, { what: opts.text });
     else if (cmd === 'fill') res = await page.fill({ scope, label: split(opts.label) }, String(opts.value ?? ''), { what: opts.label });
     else if (cmd === 'select') res = await page.select({ scope, label: split(opts.label) }, split(opts.option), { what: opts.label });
-    else if (cmd === 'attach') { await page.setFiles([path.resolve(opts.file)], { buttonSpec: opts.button ? { text: split(opts.button) } : { text: L.muse.attach } }); res = 'attached'; }
+    else if (cmd === 'attach') { if (opts['cdp-files']) await page.setFiles([path.resolve(opts.file)], { buttonSpec: opts.button ? { text: split(opts.button) } : { text: L.muse.attach } }); else await page.nativeFiles(path.resolve(opts.file)); res = 'attached'; }
     else if (cmd === 'grep') res = await page.grep({ scope, re: opts.re });
     else if (cmd === 'press') { await page.press(opts.key || 'Escape', Number(opts.times || 1)); res = 'pressed'; }
     else if (cmd === 'key-from-page') {

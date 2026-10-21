@@ -52,16 +52,15 @@ These assume the target VM is a **fresh machine**: no tunnel client, no MCP serv
 
 ---
 
-## Approvals
+## Approvals: auto-clicked by the host, no asking
 
-The run looks stuck because it **is** waiting. Cards live in the right sidebar under **需要审核** (and an **审核** button above the composer), often *not* in the chat transcript.
+Every long step must run the approval pump (SKILL.md §0.6): every ~5 s look for
+a card, open it if it is collapsed (**审核** / sidebar **需要审核**), and click the
+longest-lived option — `更多允许选项` caret → **总是允许此站点**, else **始终允许**,
+else **允许一次**. For the connector, click **连接 <name>**.
 
-**The host AI should click these itself** (SKILL.md §0.6):
+Verify: the pending badge disappears and 审核记录 shows `始终允许网站`. Then keep
+polling the page.
 
-- Egress / background task: `允许一次` is a split button → caret **更多允许选项** → **总是允许此站点**
-- ChatGPT connector consent: **连接 <name>**
-- ChatGPT per-tool card: **始终允许**
-
-Never click login / MFA / CAPTCHA / payment / scope expansion — stop and ask.
-
-Verify after clicking: the pending badge disappears and **审核记录** gains `始终允许网站`.
+Never auto-click: password / MFA / CAPTCHA, payment or plan changes, or deletion of
+things the host did not create.

@@ -22,6 +22,13 @@ Target wall-clock: **12–18 min**, of which most is the remote agent working, n
 
 Do steps 1 and 2 in parallel: the bootstrap message needs only the `tunnel_id`.
 
+## Two choices to ask the user (and nothing else)
+
+1. **Key expiry**: 30 days (default) or 永不过期/never. See step 1.
+2. **Who clicks approvals**: default is the host (§0.6). Only if the user says they want to click by themselves do you hand the cards over.
+
+Everything else in this runbook is decided for them — do not ask more questions.
+
 ## Entry points (exactly these four)
 
 | Step | URL | What you do there |
@@ -92,7 +99,10 @@ Everything here is **per account**: tunnels and connectors are scoped to whichev
 4. https://platform.openai.com/settings/organization/api-keys → **Create new secret key**:
    - Name it distinctly (`…-runtime-2` on re-runs).
    - Permissions → **Restricted** → set **Tunnels = Read + Use**, nothing else.
-   - Expiry → 30 days (avoid "never").
+   - Expiry → **ask the user once**, then pick from the dialog's list (`1 天 / 7 天 / 30 天 / 永不过期 / 自定义`):
+     - default **30 days** — right for a trial or a shared machine;
+     - **永不过期 / Never** only if the user explicitly wants a permanent key. It is a standing credential: keep it `Restricted` to Tunnels Read + Use, note its tracking id (`key_…`) so it can be found and rotated later, and still store it in a `0600` file rather than in any config that gets committed.
+   - Never widen the scope to compensate for a longer expiry.
    - The key is shown **once**, in a readonly `<input>` inside a *Save your key* dialog. Read it from the DOM into a local `0600` file **inside the same script**; never print it, never paste it into a chat message.
    - Restricted keys are **org-scoped**: re-runs in the same org may reuse one key for several tunnels, but a different OpenAI account/organization needs its own key (and its own tunnel).
 5. If the Create button stays disabled, the **expiry** field is unfilled — that is the usual cause.

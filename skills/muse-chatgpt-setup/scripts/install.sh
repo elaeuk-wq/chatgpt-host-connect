@@ -86,6 +86,11 @@ CONTROL_PLANE_TUNNEL_ID=$TUNNEL_ID
 CONTROL_PLANE_API_KEY_FILE=$DIR/run/control-plane.env
 HEALTH_PORT=$HEALTH_PORT
 EOF
+# optional egress proxy (HTTP(S)_PROXY only - ALL_PROXY makes the poll stall)
+for v in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
+  val="${!v:-}"
+  [ -n "$val" ] && printf '%s=%s\n' "$v" "$val" >> "$DIR/run/service.env"
+done
 chmod 600 "$DIR/run/service.env"
 
 # ---------- units ----------
@@ -117,7 +122,7 @@ Wants=$UNIT_MCP
 Type=simple
 WorkingDirectory=$DIR
 EnvironmentFile=$DIR/run/service.env
-ExecStart=/bin/bash -c 'env \$(cat \$CONTROL_PLANE_API_KEY_FILE) exec $DIR/bin/tunnel-client run --control-plane.tunnel-id \$CONTROL_PLANE_TUNNEL_ID --control-plane.api-key env:CONTROL_PLANE_API_KEY --mcp.server-url url=http://127.0.0.1:\$MCP_PORT/mcp --health.listen-addr 127.0.0.1:\$HEALTH_PORT --pid.file $DIR/run/tunnel.pid'
+ExecStart=/bin/bash -c 'env \$(cat \$CONTROL_PLANE_API_KEY_FILE) $DIR/bin/tunnel-client run --control-plane.tunnel-id \$CONTROL_PLANE_TUNNEL_ID --control-plane.api-key env:CONTROL_PLANE_API_KEY --mcp.server-url url=http://127.0.0.1:\$MCP_PORT/mcp --health.listen-addr 127.0.0.1:\$HEALTH_PORT --pid.file $DIR/run/tunnel.pid'
 Restart=always
 RestartSec=3
 

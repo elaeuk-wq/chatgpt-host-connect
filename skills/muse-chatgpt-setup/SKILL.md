@@ -44,6 +44,29 @@ Nothing in this flow fails silently: it **waits**. If the remote agent stops pro
 
 The approval card is frequently **not** in the chat transcript — it lives in the sidebar panel, so a public-facing run must point at it explicitly (or click it once the user has pre-authorised). One observed stall lasted until the user manually clicked the card; the agent had been reporting "waiting" with no hint of what to click. Do not repeat that: name the panel, name the button.
 
+## 0.6 The host AI clicks the approvals itself
+
+**Default behaviour: the host clicks. Do not hand a stalled run back to the user.** A public skill that says "please go find the approval card" is a skill that most users will fail. The host has a browser — use it.
+
+Click, on the user's behalf, once they have authorised the overall run:
+
+| Control | How to click it |
+|---|---|
+| Muse egress / background-task card | Right sidebar **需要审核**; `允许一次` is a split button — click **更多允许选项** (caret) → **总是允许此站点** |
+| ChatGPT connector consent | **连接 <name>** |
+| ChatGPT per-tool card | **始终允许** (or 允许一次 if the user wants the minimum) |
+
+Verify after clicking: the pending badge disappears and **审核记录** gains a line like `始终允许网站`. Then keep polling the page — clicking is not proof the remote work resumed.
+
+**Never click these; stop and ask the user:**
+
+- sign-in, password, MFA, CAPTCHA, "continue as <account>"
+- purchases, plan changes, billing
+- granting scopes beyond **Tunnels: Read + Use**, or any account-security setting
+- anything destructive to existing services, tunnels, connectors or data
+
+If the host has no browser control, say so plainly and give the user the exact click target — that is the only case where the human clicks.
+
 ## 1. Platform: tunnel + restricted key
 
 Everything here is **per account**: tunnels and connectors are scoped to whichever OpenAI account/organization you are signed into. Two accounts can each own a tunnel called `aws` — that is not a sign you are in the same place, and you must not expect tunnels or connectors from another account to be visible. Build fresh in the account you are in; nothing else is required.

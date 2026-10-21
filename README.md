@@ -39,7 +39,7 @@ In both modes the key ends up in a local `0600` file, is attached to the Muse ch
 
 ## Requirements
 
-- **Your everyday Chrome with remote debugging on**, signed in to platform.openai.com, chatgpt.com and muse.ai. Open `chrome://inspect/#remote-debugging` and switch it on (Chrome 144+). The first time the skill connects, Chrome asks you to **Allow** the connection — click it once. The skill finds the endpoint by itself.
+- **Your everyday Chrome with remote debugging on**, signed in to platform.openai.com, chatgpt.com and muse.ai. Open `chrome://inspect/#remote-debugging` and switch it on (Chrome 144+). When a run starts, Chrome asks you to **Allow** the connection — click it once per run; the script and any AI fallback share that one connection, which ends when the run finishes (or after 10 idle minutes). The skill finds the endpoint by itself.
   - Alternative: a separate profile started with `--remote-debugging-port=9333 --user-data-dir="$HOME/.muse-chatgpt-setup/chrome"` (sign in there once), then pass `--cdp http://127.0.0.1:9333`.
 - **Node.js 22+** where the agent runs (no npm packages needed). Semi-automatic mode needs macOS (`pbpaste`).
 - An OpenAI account that may create tunnels and API keys; a Muse VM with `curl` and `python3`.

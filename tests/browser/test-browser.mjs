@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -118,6 +119,28 @@ fs.writeFileSync(SB, JSON.stringify(sb));
 r = cli(SB, 'run', '--from-step', 'plugin');
 n = await api('counts');
 check('exit 12 refused, plugin count unchanged', r.code === 12 && r.last.refused === true && n.plugins === 1, { last: r.last, plugins: n.plugins });
+
+// ------------------------------------------------------------ D: one shared Chrome connection
+console.log('D. all commands share one relay connection (one Allow click on the everyday Chrome)');
+const relaySock = (stateFile) => {
+  const dir = path.dirname(path.resolve(stateFile));
+  const tag = crypto.createHash('sha256').update(`${dir}\0http://127.0.0.1:${CDP}`).digest('hex').slice(0, 10);
+  const p = path.join(dir, `cdp-${tag}.sock`);
+  return p.length < 100 ? p : path.join(os.tmpdir(), `muse-setup-cdp-${tag}.sock`);
+};
+const relayPid = (stateFile) => { try { return JSON.parse(fs.readFileSync(relaySock(stateFile) + '.status', 'utf8')).pid; } catch { return null; } };
+check('a fully successful run ends its relay', !fs.existsSync(relaySock(SA)));
+const pid0 = relayPid(SB);
+r = cli(SB, 'snapshot', '--tab', `${FXURL}/`, '--limit', '3');
+const pid1 = relayPid(SB);
+r = cli(SB, 'grep', '--tab', `${FXURL}/`, '--re', 'Muse');
+const pid2 = relayPid(SB);
+check('relay kept across run + fallback tools (same pid)', pid0 && pid0 === pid1 && pid1 === pid2 && r.code === 0, { pid0, pid1, pid2, last: r.last });
+check('relay socket is 0600', pid2 && (fs.statSync(relaySock(SB)).mode & 0o777) === 0o600);
+r = cli(SB, 'relay', 'stop');
+await sleep(500);
+let alive = true; try { process.kill(pid2, 0); } catch { alive = false; }
+check('relay stop ends the relay process and removes the socket', r.last.relay === 'stopped' && !alive && !fs.existsSync(relaySock(SB)), { last: r.last, alive });
 
 check('no key value in any CLI output', !/sk-proj-[0-9a-f]{10}/.test(ALL_OUT));
 console.log(`\nresult: ${pass} passed, ${fail} failed   (work dir ${WORK})`);

@@ -12,7 +12,7 @@ Target: about 5-6 minutes on a first run, most of it the Muse agent installing. 
 
 ## Requirements
 
-- A Chrome reachable over CDP, signed in to platform.openai.com, chatgpt.com and muse.ai. Default `--cdp auto`: the everyday Chrome with `chrome://inspect/#remote-debugging` switched on (found via its `DevToolsActivePort` file; the user clicks **Allow** once on Chrome's prompt — if the run says `waiting for Chrome`, tell the user to click it). Override with `--cdp ws://…`, `--cdp http://host:port` (a separate profile started with `--remote-debugging-port` and `--user-data-dir`) or `MUSE_SETUP_CDP`.
+- A Chrome reachable over CDP, signed in to platform.openai.com, chatgpt.com and muse.ai. Default `--cdp auto`: the everyday Chrome with `chrome://inspect/#remote-debugging` switched on (found via its `DevToolsActivePort` file; the user clicks **Allow** on Chrome's prompt — if the run says `waiting for Chrome`, tell the user to click it). All commands, including the fallback tools, share one connection held by `relay.mjs`, so that is one click per run; it ends after a full run, after 10 idle minutes, or with `relay stop`. Never pass `--no-relay` on the everyday Chrome: each command would prompt again. Override with `--cdp ws://…`, `--cdp http://host:port` (a separate profile started with `--remote-debugging-port` and `--user-data-dir`) or `MUSE_SETUP_CDP`.
 - Node >= 22 on the machine running the agent. Semi-automatic key mode also needs macOS `pbpaste`/`pbcopy`.
 - The OpenAI account may create tunnels and API keys; the Muse VM has `curl` and `python3`.
 

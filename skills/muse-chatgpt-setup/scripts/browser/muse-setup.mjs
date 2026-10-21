@@ -53,6 +53,18 @@ const HOME_DIR = path.join(os.homedir(), '.muse-chatgpt-setup');
 const STATE_FILE = path.resolve(opts.state || path.join(HOME_DIR, 'state.json'));
 const DATA_DIR = path.dirname(STATE_FILE);
 const CDP = opts.cdp || process.env.MUSE_SETUP_CDP || 'auto';
+// One shared Chrome connection per state dir + endpoint (see relay.mjs); the
+// everyday Chrome then asks for Allow once instead of once per command.
+const RELAY_SOCK = (() => {
+  const tag = crypto.createHash('sha256').update(`${DATA_DIR}\0${CDP}`).digest('hex').slice(0, 10);
+  const p = path.join(DATA_DIR, `cdp-${tag}.sock`);
+  return p.length < 100 ? p : path.join(os.tmpdir(), `muse-setup-cdp-${tag}.sock`); // Unix socket path limit
+})();
+const browserConnect = () => {
+  if (opts['no-relay']) return connect(CDP);
+  ensureDir(DATA_DIR);
+  return connect(CDP, { relay: RELAY_SOCK });
+};
 const URLS = {
   platform: (opts['platform-url'] || 'https://platform.openai.com').replace(/\/+$/, ''),
   muse: (opts['muse-url'] || 'https://muse.ai').replace(/\/+$/, ''),
@@ -857,7 +869,7 @@ async function run() {
   const state = loadState();
   saveState(state);
   const dry = !!opts['dry-run'];
-  const browser = await connect(CDP);
+  const browser = await browserConnect();
   const opened = [];
   const museTabs = [];
   const c = {
@@ -942,7 +954,7 @@ async function run() {
     test: out.token1 ? `${out.token1} @ ${out.utc1}, ${out.token2} @ ${out.utc2}, host ${out.hostname}` : undefined,
     logs: out.forwarded !== undefined ? `${out.forwarded} forwarded lines (${out.forwarded_with_tunnel_id} with tunnel id), ${out.mcp_calls} MCP calls` : undefined,
   } });
-  browser.close();
+  browser.shutdown();
   return 0;
 }
 
@@ -999,7 +1011,7 @@ async function tabFor(browser) {
 }
 
 async function toolCmd() {
-  const browser = await connect(CDP);
+  const browser = await browserConnect();
   try {
     const page = await tabFor(browser);
     const scope = opts.scope || 'page';
@@ -1043,10 +1055,11 @@ function keyFromClipboard() {
 function usage() {
   process.stdout.write(`usage:
   ${CMD} run [--mode auto|manual] [--cdp URL] [--workspace NAME] [--project NAME]
-             [--from-step STEP] [--only STEP] [--dry-run] [--keep-key] [--state FILE] [--labels FILE] [--ref TAG]
+             [--from-step STEP] [--only STEP] [--dry-run] [--keep-key] [--no-relay] [--state FILE] [--labels FILE] [--ref TAG]
   ${CMD} state show | done <step> k=v ... | set names.plugin="..." | reset <step> [--rename]
   ${CMD} message install|restore|logs           print the Muse message text
   ${CMD} key-from-clipboard | key-from-page --tab URL
+  ${CMD} relay stop          end the shared Chrome connection (otherwise: after a full run, or 10 idle minutes)
   ${CMD} snapshot|click|fill|select|attach|grep|press --tab URL-PREFIX [--scope dialog]
         [--text "A|B"] [--label "A|B"] [--value V] [--option "A|B"] [--file F] [--re REGEX] [--key Escape]
 steps: ${STEP_NAMES.join(' -> ')}
@@ -1060,6 +1073,12 @@ async function main() {
     if (cmd === 'run') return await run();
     if (cmd === 'state') return stateCmd();
     if (cmd === 'key-from-clipboard') return keyFromClipboard();
+    if (cmd === 'relay' && pos[0] === 'stop') {
+      if (!fs.existsSync(RELAY_SOCK)) { emit({ ok: true, relay: 'not running' }); return 0; }
+      (await browserConnect()).shutdown();
+      emit({ ok: true, relay: 'stopped' });
+      return 0;
+    }
     if (cmd === 'message') {
       const st = loadState(); const o = outputsOf(st);
       const m = pos[0] === 'logs' ? MUSE_LOGS_MESSAGE : pos[0] === 'restore' ? MUSE_RESTORE_MESSAGE : museInstallMessage({ key_file: st.key_file, tunnel_id: o.tunnel_id || 'TUNNEL_ID' });

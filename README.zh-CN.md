@@ -39,7 +39,7 @@ ChatGPT 多出一个插件，里面两个工具真的在你的 Muse VM 上执行
 
 ## 前提
 
-- **你日常用的 Chrome，打开远程调试**，并已登录 platform.openai.com、chatgpt.com 和 muse.ai。地址栏打开 `chrome://inspect/#remote-debugging`，把开关打开（Chrome 144 起）。技能第一次连接时 Chrome 会弹窗，点一次 **允许** 即可。连接地址技能自己找。
+- **你日常用的 Chrome，打开远程调试**，并已登录 platform.openai.com、chatgpt.com 和 muse.ai。地址栏打开 `chrome://inspect/#remote-debugging`，把开关打开（Chrome 144 起）。每次开始运行时 Chrome 会弹窗，点一次 **允许** 即可；脚本和 AI 兜底共用这一条连接，跑完（或闲置 10 分钟）自动断开。连接地址技能自己找。
   - 另一种：用单独的用户目录启动 Chrome：`--remote-debugging-port=9333 --user-data-dir="$HOME/.muse-chatgpt-setup/chrome"`（在里面登录一次），再传 `--cdp http://127.0.0.1:9333`。
 - agent 所在机器有 **Node.js 22+**（不需要装 npm 包）。半自动模式需要 macOS（`pbpaste`）。
 - OpenAI 账号有建隧道和 API Key 的权限；Muse VM 上有 `curl` 和 `python3`。

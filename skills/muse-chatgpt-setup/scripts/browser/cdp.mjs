@@ -54,20 +54,27 @@ async function wsFromHttp(base) {
 
 // endpoint: "auto" (default), "ws://..." or "http://host:port".
 // auto = the everyday Chrome's DevToolsActivePort, then http://127.0.0.1:9222.
-export async function connect(endpoint = 'auto') {
+export async function resolveWsUrl(endpoint = 'auto') {
   const base = endpoint.replace(/\/+$/, '');
-  let url = null;
-  if (base.startsWith('ws')) url = base;
-  else if (base === 'auto') url = (await wsFromActivePort()) || (await wsFromHttp('http://127.0.0.1:9222'));
-  else url = await wsFromHttp(base);
-  if (!url) {
-    throw new StepError(`cannot find a Chrome DevTools endpoint (${base})`, {
-      expected: 'remote debugging on: chrome://inspect/#remote-debugging in the signed-in Chrome, ' +
-        'or a Chrome started with --remote-debugging-port and its own --user-data-dir',
-    });
-  }
+  if (base.startsWith('ws')) return base;
+  if (base === 'auto') return (await wsFromActivePort()) || (await wsFromHttp('http://127.0.0.1:9222'));
+  return wsFromHttp(base);
+}
+
+const NO_ENDPOINT = {
+  expected: 'remote debugging on: chrome://inspect/#remote-debugging in the signed-in Chrome, ' +
+    'or a Chrome started with --remote-debugging-port and its own --user-data-dir',
+};
+const ALLOW_HINT = 'waiting for Chrome: click "Allow" on the remote-debugging prompt\n';
+
+// With `relay` (a socket path) every process shares one Chrome connection held
+// by relay.mjs, so the everyday Chrome asks for Allow once, not per command.
+export async function connect(endpoint = 'auto', { relay } = {}) {
+  if (relay) return new Browser(await relayTransport(endpoint, relay));
+  const url = await resolveWsUrl(endpoint);
+  if (!url) throw new StepError(`cannot find a Chrome DevTools endpoint (${endpoint})`, NO_ENDPOINT);
   // The everyday profile asks the user to allow the connection; this can take a while.
-  const hint = setTimeout(() => process.stderr.write('waiting for Chrome: click "Allow" on the remote-debugging prompt\n'), 3000);
+  const hint = setTimeout(() => process.stderr.write(ALLOW_HINT), 3000);
   const ws = new WebSocket(url);
   try {
     await new Promise((resolve, reject) => {
@@ -80,6 +87,59 @@ export async function connect(endpoint = 'auto') {
     clearTimeout(hint);
   }
   return new Browser(ws);
+}
+
+// Unix socket speaking newline-delimited JSON, shaped like the WebSocket API
+// Browser uses (addEventListener message/close, send, close).
+async function socketTransport(sockPath) {
+  const net = await import('node:net');
+  const sock = await new Promise((resolve, reject) => {
+    const s = net.createConnection(sockPath);
+    s.once('connect', () => resolve(s));
+    s.once('error', reject);
+  });
+  const on = { message: [], close: [] };
+  let buf = '';
+  sock.setEncoding('utf8');
+  sock.on('data', (d) => {
+    buf += d;
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const data = buf.slice(0, i); buf = buf.slice(i + 1);
+      if (data) for (const fn of on.message) fn({ data });
+    }
+  });
+  sock.on('close', () => { for (const fn of on.close) fn(); });
+  sock.on('error', () => {});
+  return {
+    addEventListener(type, fn) { on[type]?.push(fn); },
+    send(s) { sock.write(s + '\n'); },
+    close() { sock.end(); },
+    shutdown() { sock.end('{"relay":"shutdown"}\n'); },
+  };
+}
+
+async function relayTransport(endpoint, sockPath) {
+  try { return await socketTransport(sockPath); } catch { /* not running: start it */ }
+  const fs = await import('node:fs');
+  const { spawn } = await import('node:child_process');
+  const statusFile = `${sockPath}.status`;
+  try { fs.unlinkSync(statusFile); } catch { /* none */ }
+  const relayJs = new URL('./relay.mjs', import.meta.url).pathname;
+  spawn(process.execPath, [relayJs, endpoint, sockPath], { detached: true, stdio: 'ignore' }).unref();
+  const deadline = Date.now() + 180000;
+  let hinted = false;
+  while (Date.now() < deadline) {
+    await sleep(300);
+    let st = null;
+    try { st = JSON.parse(fs.readFileSync(statusFile, 'utf8')); } catch { /* not yet */ }
+    if (st?.state === 'error') {
+      throw new StepError(st.error, st.error.startsWith('cannot find') ? NO_ENDPOINT : { expected: 'the user clicks Allow on Chrome\'s remote-debugging prompt' });
+    }
+    if (st?.state === 'ready') return socketTransport(sockPath);
+    if (st?.state === 'waiting_for_allow' && !hinted && Date.now() > deadline - 177000) { process.stderr.write(ALLOW_HINT); hinted = true; }
+  }
+  throw new StepError('timed out waiting for Chrome to accept the connection (3 min)', { expected: 'the user clicks Allow on Chrome\'s remote-debugging prompt' });
 }
 
 class Browser {
@@ -98,6 +158,10 @@ class Browser {
       } else if (msg.method) {
         for (const fn of this.listeners) fn(msg);
       }
+    });
+    ws.addEventListener('close', () => {
+      for (const { reject, method } of this.pending.values()) reject(new Error(`${method}: browser connection closed`));
+      this.pending.clear();
     });
   }
 
@@ -148,6 +212,11 @@ class Browser {
 
   close() {
     try { this.ws.close(); } catch { /* ignore */ }
+  }
+
+  // Also stop the shared relay (if any): the Chrome connection ends now.
+  shutdown() {
+    try { (this.ws.shutdown || this.ws.close).call(this.ws); } catch { /* ignore */ }
   }
 }
 

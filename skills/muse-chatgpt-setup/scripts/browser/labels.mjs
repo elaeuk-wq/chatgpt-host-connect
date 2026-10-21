@@ -40,8 +40,10 @@ export const LABELS = {
   muse: {
     newChat: ['New chat', 'New task', 'New conversation', '新对话', '新建对话', '新任务', '新聊天'],
     composer: ['Message', 'Ask anything', 'Send a message', '发消息', '输入消息', '给 Muse 发消息', '有什么可以帮你'],
-    attach: ['Attach', 'Attach files', 'Upload', 'Add files', '添加附件', '上传文件', '附件', '上传'],
+    attach: ['Attach', 'Attach file', 'Attach files', 'Upload', 'Add files', '附加文件', '添加附件', '上传文件', '附件', '上传'],
     send: ['Send', 'Send message', '发送', '发送消息'],
+    undelivered: ['未确认送达', '发送失败', '未送达', 'Not delivered', 'Failed to send', 'Delivery not confirmed', 'Unable to send'],
+    connecting: ['正在连接', '连接中', 'Connecting', 'Reconnecting'],
     reviewBadge: ['Needs review', 'Review required', 'Pending review', '需要审核', '待审核'],
     reviewButton: ['Review', '审核'],
     allowOnce: ['Allow once', '允许一次'],

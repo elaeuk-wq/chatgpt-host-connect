@@ -621,7 +621,11 @@ async function stepKey(c) {
     const done = (await page.find({ scope: 'dialog', text: L.common.done }))[0];
     if (done) await page.click(done.id);
   }
-  const row = await page.waitFor(() => keyRow(page, name), { timeout: T(10000) });
+  let row = await page.waitFor(() => keyRow(page, name), { timeout: T(10000) });
+  if (!row) { // the list may not refresh by itself
+    await page.goto(URLS.platform + '/settings/organization/api-keys');
+    row = await page.waitFor(() => keyRow(page, name), { timeout: T(10000) });
+  }
   if (!row) throw new StepError('new key not visible in the key list', { expected: `a row named ${name}`, found: await page.snapshot({ text: [name] }) });
   return { key_name: name, key_file: c.state.key_file, key_fp: fp, key_row: row, project: projectShown || null, expiry: '30 days' };
 }
@@ -643,6 +647,25 @@ async function recoverKey(c) {
 }
 
 // ---------------------------------------------------------------- muse
+const reEsc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// A freshly reset Muse shows "Muse正在连接…" while its VM starts; messages sent
+// then are dropped ("未确认送达"). Wait for that status to go away first.
+async function museConnected(page) {
+  // The status lives in a role=status announcer plus truncated labels; read them directly.
+  const status = () => page.eval((a) => {
+    const re = new RegExp(a.re, 'i');
+    const ann = document.querySelector('[data-hatch-connection-status-announcer],[role=status][aria-live]');
+    if (ann && re.test(ann.textContent)) return ann.textContent.trim();
+    const leaf = [...document.querySelectorAll('span,div,p')].find((e) => e.children.length === 0 && re.test(e.textContent) && e.getClientRects().length);
+    return leaf ? leaf.textContent.trim() : null;
+  }, { re: L.muse.connecting.map(reEsc).join('|') });
+  if (!(await status())) return;
+  note('Muse is still connecting (fresh VM?) - waiting up to 5 min');
+  const ok = await page.waitFor(async () => !(await status()), { timeout: T(300000), interval: 3000 });
+  if (!ok) throw new StepError('Muse is still connecting', { expected: 'Muse ready (no "connecting" status)', found: [await status()], hint: 'reload the Muse chat; after a reset its VM can take a while to start' });
+}
+
 async function stepMuseInstall(c) {
   if (!keyFileOk(c.state.key_file)) throw new StepError('key file missing or not 0600', { expected: c.state.key_file });
   const page = await c.open('muse', '/');
@@ -650,9 +673,12 @@ async function stepMuseInstall(c) {
   const nc = (await page.find({ text: L.muse.newChat, limit: 1 }))[0];
   if (nc) await page.click(nc.id, { settle: 800 });
   const comp = await composer(page, 'muse');
+  await museConnected(page);
   await page.setFiles([c.state.key_file], { buttonSpec: { text: L.muse.attach, exclude: '[role=dialog]' }, what: 'attach button' });
   const base = path.basename(c.state.key_file);
-  const chip = await page.waitFor(() => page.grep({ re: base.replace(/[.]/g, '\\.'), exclude: 'textarea,script,style' }), { timeout: T(15000) });
+  // Muse renders the name as two spans ("control-plane-key-…" + ".txt"): match the stem.
+  const stem = base.replace(/\.[^.]+$/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const chip = await page.waitFor(() => page.grep({ re: stem, exclude: 'textarea,script,style' }), { timeout: T(15000) });
   if (!chip) throw new StepError('attachment did not appear', { expected: `a chip named ${base}`, found: await page.snapshot({ text: [base] }) });
   const msg = museInstallMessage({ key_file: c.state.key_file, tunnel_id: c.out.tunnel_id });
   fs.writeFileSync(path.join(DATA_DIR, 'muse-install-message.txt'), msg + '\n', { mode: 0o600 });
@@ -661,7 +687,13 @@ async function stepMuseInstall(c) {
   await sendMessage(page, 'muse', L.muse.send, comp);
   const sent = await page.waitFor(() => page.grep({ re: c.out.tunnel_id }), { timeout: T(8000) });
   if (!sent) throw new StepError('sent message not visible', { expected: `a message containing ${c.out.tunnel_id}` });
-  await sleep(1500);
+  // The bubble shows at once; Muse marks it undelivered a few seconds later if the server did not take it.
+  await sleep(T(6000));
+  const undelivered = await page.grep({ re: L.muse.undelivered.map(reEsc).join('|') });
+  if (undelivered.length) {
+    c.submitted('running'); // not stored by Muse: the next run sends it again
+    throw new StepError('Muse did not accept the message', { expected: 'the install message delivered', found: undelivered, hint: 'a freshly reset Muse may still be starting; reload the chat, check it answers a short message, then rerun' });
+  }
   return { muse_chat_url: (await page.url()).split('#')[0], sent_at: new Date().toISOString() };
 }
 

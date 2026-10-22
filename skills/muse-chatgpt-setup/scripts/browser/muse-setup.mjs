@@ -125,6 +125,14 @@ const clip = {
 };
 
 // ---------------------------------------------------------------- messages
+// The Muse hook restarts the install after a VM swap (only the agent's hooks tool can register it).
+const KEEPALIVE_LINES = [
+  'report 里是 control-plane  : OK 之后，设置换机后自动恢复：',
+  'mkdir -p ~/hooks/scripts && cp ~/muse-chatgpt/muse-hook.sh ~/hooks/scripts/muse-chatgpt-keepalive.sh',
+  '用你的 hooks 工具注册它：id=muse-chatgpt-keepalive，script_path=~/hooks/scripts/muse-chatgpt-keepalive.sh，poll_interval_secs=60，' +
+    'prompt=「muse-chatgpt 自动恢复失败。读 ~/muse-chatgpt/logs/keepalive.log 最后 40 行，用两句话告诉我原因和要我做什么（比如批准 api.openai.com 出网、换 Key）。不要改配置，不要输出密钥。」',
+  '先 dry_run，结果是 silent 再 enable。已有同 id 的 hook 就用 update，不要重复建。',
+];
 function museInstallMessage(o) {
   return [
     '请在这台机器上安装一条到 ChatGPT 的连接，全部装在 ~/muse-chatgpt，不要动其他服务。',
@@ -139,9 +147,18 @@ function museInstallMessage(o) {
     `TUNNEL_ID=${o.tunnel_id} KEY_FILE="$KEY_PATH" CONSUME_KEY_FILE=1 bash install.sh`,
     '',
     '如果弹出允许访问 api.openai.com 的审批，选长期允许。',
-    '装完只回复脚本最后 report 段的原文（两条横线之间的内容），不要输出任何密钥。',
+    '',
+    ...KEEPALIVE_LINES,
+    '',
+    '装完只回复脚本最后 report 段的原文（两条横线之间的内容），再加一行 keepalive: enabled（没启用就写原因），不要输出任何密钥。',
   ].join('\n');
 }
+const MUSE_KEEPALIVE_MESSAGE = [
+  '给 ~/muse-chatgpt 加上换机后自动恢复，不要动其他服务。先原样执行（更新安装脚本并重启，会生成 ~/muse-chatgpt/muse-hook.sh）：',
+  `cd ~/muse-chatgpt && curl -fsSL ${RAW}/install.sh -o install.sh && bash restore.sh`,
+  ...KEEPALIVE_LINES,
+  '只回复 report 段原文，再加一行 keepalive: enabled（没启用就写原因）。',
+].join('\n');
 const MUSE_RESTORE_MESSAGE = '审批已处理。请运行 bash ~/muse-chatgpt/restore.sh ，只回复 report 段原文。';
 const MUSE_LOGS_MESSAGE = [
   '只回报事实，不要改任何配置。运行下面两条命令并原样贴出输出：',
@@ -1181,7 +1198,7 @@ function usage() {
   ${CMD} run [--mode auto|manual] [--cdp URL] [--workspace NAME] [--project NAME]
              [--from-step STEP] [--only STEP] [--dry-run] [--keep-key] [--no-relay] [--state FILE] [--labels FILE] [--ref TAG]
   ${CMD} state show | done <step> k=v ... | set names.plugin="..." | reset <step> [--rename]
-  ${CMD} message install|restore|logs           print the Muse message text
+  ${CMD} message install|restore|keepalive|logs print the Muse message text
   ${CMD} key-from-clipboard | key-from-page --tab URL
   ${CMD} relay stop          end the shared Chrome connection (otherwise: after a full run, or 10 idle minutes)
   ${CMD} snapshot|click|fill|select|attach|grep|press --tab URL-PREFIX [--scope dialog]
@@ -1205,7 +1222,7 @@ async function main() {
     }
     if (cmd === 'message') {
       const st = loadState(); const o = outputsOf(st);
-      const m = pos[0] === 'logs' ? MUSE_LOGS_MESSAGE : pos[0] === 'restore' ? MUSE_RESTORE_MESSAGE : museInstallMessage({ key_file: st.key_file, tunnel_id: o.tunnel_id || 'TUNNEL_ID' });
+      const m = pos[0] === 'logs' ? MUSE_LOGS_MESSAGE : pos[0] === 'restore' ? MUSE_RESTORE_MESSAGE : pos[0] === 'keepalive' ? MUSE_KEEPALIVE_MESSAGE : museInstallMessage({ key_file: st.key_file, tunnel_id: o.tunnel_id || 'TUNNEL_ID' });
       process.stdout.write(m + '\n');
       return 0;
     }

@@ -153,9 +153,11 @@ stop_all() {
 
 if [ "$ACTION" = "stop" ]; then
   stop_all
+  [ -d "$DIR/run" ] && : > "$DIR/run/stopped"   # keepalive.sh leaves a stopped install alone
   say "stopped"
   exit 0
 fi
+rm -f "$DIR/run/stopped"
 
 # ---------- tunnel id ----------
 TUNNEL_ID="${TUNNEL_ID:-$SAVED_TUNNEL_ID}"
@@ -187,6 +189,77 @@ cat > "$DIR/restore.sh" <<EOF
 exec env DIR="$DIR" INSTANCE="$INSTANCE" bash "$DIR/install.sh" "\${1:-restore}"
 EOF
 chmod 755 "$DIR/restore.sh"
+
+# ---------- keepalive: restart after a VM swap without anyone asking ----------
+# keepalive.sh is plain bash (cron, a Muse hook, anything that polls).
+# muse-hook.sh wraps it in the Muse hook protocol (one silent/wake line).
+cat > "$DIR/keepalive.sh" <<EOF
+#!/usr/bin/env bash
+# Restart this install when its processes are gone (for example after a VM swap).
+# Exit 0: running, restarted, stopped on purpose or no key yet.
+# Exit 1: restart failed (first failure).  Exit 2: still failing; retries every 10 min.
+# DRY_RUN=1 only reports.
+set -uo pipefail
+DIR="$DIR"
+EOF
+cat >> "$DIR/keepalive.sh" <<'EOF'
+LOG="$DIR/logs/keepalive.log"
+FAIL="$DIR/run/keepalive.failed"
+say() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+[ -f "$DIR/run/stopped" ] && { echo "stopped on purpose (restore.sh stop)"; exit 0; }
+[ -s "$DIR/run/control-plane.env" ] || { echo "no key installed yet"; exit 0; }
+SAVED_MCP_PORT="" SAVED_HEALTH_PORT=""
+# shellcheck disable=SC1091
+. "$DIR/run/config.env" 2>/dev/null || true
+# Healthy = MCP answers and the tunnel polled OpenAI successfully in the last
+# KEEPALIVE_STALE_SECS (a live process with a rejected key is not healthy).
+STALE="${KEEPALIVE_STALE_SECS:-300}"
+up() { curl -fsS --max-time 3 "http://127.0.0.1:$1/healthz" >/dev/null 2>&1; }
+last_poll() {
+  curl -fsS --max-time 3 "http://127.0.0.1:$SAVED_HEALTH_PORT/metrics" 2>/dev/null | awk '
+    $1 == "commands_poll_last_successful_timestamp_seconds" || index($1, "commands_poll_last_successful_timestamp_seconds{") == 1 { v = $NF }
+    END { printf "%d\n", v + 0 }'
+}
+WHY="not running"
+if [ -n "$SAVED_MCP_PORT" ] && [ -n "$SAVED_HEALTH_PORT" ] && up "$SAVED_MCP_PORT" && up "$SAVED_HEALTH_PORT"; then
+  AGE=$(( $(date +%s) - $(last_poll) ))
+  [ "$AGE" -lt "$STALE" ] && { rm -f "$FAIL"; echo "running"; exit 0; }
+  WHY="up, but no successful poll for ${AGE}s"
+fi
+[ "${DRY_RUN:-0}" = "1" ] && { echo "$WHY; would run restore.sh"; exit 0; }
+if [ -f "$FAIL" ] && [ $(( $(date +%s) - $(cat "$FAIL" 2>/dev/null || echo 0) )) -lt 600 ]; then
+  echo "still failing; next retry within 10 min"; exit 2
+fi
+exec 9>"$DIR/run/keepalive.lock"
+command -v flock >/dev/null 2>&1 && { flock -n 9 || { echo "a restart is already running"; exit 0; }; }
+[ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 1000000 ] && mv -f "$LOG" "$LOG.prev"
+say "$WHY; restore.sh" >> "$LOG"
+bash "$DIR/restore.sh" >> "$LOG" 2>&1
+RC=$?
+if [ "$RC" = 0 ]; then
+  rm -f "$FAIL"; say "restarted" >> "$LOG"; echo "restarted"; exit 0
+fi
+FIRST=1; [ -f "$FAIL" ] && FIRST=0
+date +%s > "$FAIL"
+VERDICT="$(tail -n 40 "$LOG" | grep '^control-plane  :' | tail -n 1)"
+echo "restart failed (exit $RC) ${VERDICT#control-plane  : }; see $LOG"
+[ "$FIRST" = 1 ] && exit 1 || exit 2
+EOF
+chmod 755 "$DIR/keepalive.sh"
+
+cat > "$DIR/muse-hook.sh" <<EOF
+#!/usr/bin/env bash
+# Muse hook: keeps $DIR running across VM swaps. Copy to ~/hooks/scripts/,
+# register it with the hooks tool (poll 60 s), dry_run, then enable.
+RT="\$(dirname "\$0")/../runtime/hatch_hook_runtime.sh"
+[ -f "\$RT" ] || RT="\$HOME/hooks/runtime/hatch_hook_runtime.sh"
+. "\$RT"
+OUT="\$(DRY_RUN="\${HATCH_HOOK_DRY_RUN:-0}" bash "$DIR/keepalive.sh" 2>&1)"
+RC=\$?
+OUT="\$(printf '%s\\n' "\$OUT" | tail -n 1)"
+if [ "\$RC" = 1 ]; then wake "muse-chatgpt: \$OUT"; else silent "muse-chatgpt: \$OUT"; fi
+EOF
+chmod 755 "$DIR/muse-hook.sh"
 
 # ---------- tunnel-client ----------
 detect_target() {

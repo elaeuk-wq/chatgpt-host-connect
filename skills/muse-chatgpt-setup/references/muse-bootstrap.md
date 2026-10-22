@@ -25,14 +25,26 @@ curl -fsSL https://raw.githubusercontent.com/elaeuk-wq/muse-chatgpt-setup-skill/
 TUNNEL_ID=TUNNEL_ID KEY_FILE="$KEY_PATH" CONSUME_KEY_FILE=1 bash install.sh
 
 如果弹出允许访问 api.openai.com 的审批，选长期允许。
-装完只回复脚本最后 report 段的原文（两条横线之间的内容），不要输出任何密钥。
+
+report 里是 control-plane  : OK 之后，设置换机后自动恢复：
+mkdir -p ~/hooks/scripts && cp ~/muse-chatgpt/muse-hook.sh ~/hooks/scripts/muse-chatgpt-keepalive.sh
+用你的 hooks 工具注册它：id=muse-chatgpt-keepalive，script_path=~/hooks/scripts/muse-chatgpt-keepalive.sh，poll_interval_secs=60，prompt=「muse-chatgpt 自动恢复失败。读 ~/muse-chatgpt/logs/keepalive.log 最后 40 行，用两句话告诉我原因和要我做什么（比如批准 api.openai.com 出网、换 Key）。不要改配置，不要输出密钥。」
+先 dry_run，结果是 silent 再 enable。已有同 id 的 hook 就用 update，不要重复建。
+
+装完只回复脚本最后 report 段的原文（两条横线之间的内容），再加一行 keepalive: enabled（没启用就写原因），不要输出任何密钥。
 ```
 
 `CONSUME_KEY_FILE=1` makes `install.sh` copy the key into `~/muse-chatgpt/run/control-plane.env`
 (0600), then overwrite and delete the attachment. Without a key the script still installs
 everything, prints `KEY MISSING` and exits 3; the key can follow with the rotate message.
 
-## Restart after approving egress, or after a VM swap
+## Add the keep-alive hook to an older install
+
+`node scripts/browser/muse-setup.mjs message keepalive` prints it: download the current `install.sh`, `restore.sh`, then the same hook lines as above.
+
+The hook calls `~/muse-chatgpt/keepalive.sh` every 60 s: healthy = MCP answers and the tunnel polled OpenAI in the last 5 min; otherwise it runs `restore.sh` (log: `~/muse-chatgpt/logs/keepalive.log`). It wakes the agent only on the first failed restart, then retries every 10 min quietly.
+
+## Restart by hand after approving egress
 
 ```text
 审批已处理。请运行 bash ~/muse-chatgpt/restore.sh ，只回复 report 段原文。

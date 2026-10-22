@@ -98,7 +98,9 @@ The full list is `scripts/browser/labels.mjs`. If the UI uses other words, pass 
 - judges the link by the tunnel's `commands_poll_last_successful_timestamp_seconds` metric (same as `tunnel-client health --require-control-plane-poll`), and reads logs only from this start;
 - prints a report ending in `control-plane  : OK | PENDING | KEY MISSING | KEY REJECTED | KEY FORBIDDEN | TUNNEL EXITED`; exit `0`, `2` pending, `3` key problem, `4` start failure.
 
-`bash ~/muse-chatgpt/restore.sh` restarts after a VM swap; `KEY_FILE=<file> CONSUME_KEY_FILE=1 bash ~/muse-chatgpt/restore.sh` rotates the key; `restore.sh stop` stops both processes.
+It also writes `keepalive.sh` (restart when MCP is down or the tunnel has not polled successfully for 5 min; never touches an install stopped with `restore.sh stop`; after a failed restart it retries every 10 min) and `muse-hook.sh`, the same check in the Muse hook protocol. The install message has the Muse agent copy it to `~/hooks/scripts/muse-chatgpt-keepalive.sh` and register it with its hooks tool (60 s, dry_run, enable): `/` is wiped on a VM swap and Muse boots no units, so without the hook nothing restarts the services. The hook wakes the agent only on the first failed restart. `node $S message keepalive` adds it to an older install.
+
+`bash ~/muse-chatgpt/restore.sh` restarts by hand; `KEY_FILE=<file> CONSUME_KEY_FILE=1 bash ~/muse-chatgpt/restore.sh` rotates the key; `restore.sh stop` stops both processes.
 
 Gate: never create the ChatGPT plugin before the report says OK - ChatGPT then shows a misleading rate-limit error and the plugin never works. The script enforces this.
 
@@ -112,7 +114,7 @@ Gate: never create the ChatGPT plugin before the report says OK - ChatGPT then s
 | ChatGPT: *rate limited* while creating the plugin | in practice: the tunnel was not polling | get `control-plane  : OK` first |
 | Plugin listed but tools are `[]` / "tool does not exist" | consent (**Connect <name>**) never confirmed | open the plugin page -> Connect -> Connect <name> |
 | Tool missing although the server lists it | the plugin cached tools and descriptions at discovery | create a new plugin; *refresh tools* does not help |
-| `Connection timed out` | VM was replaced, processes gone | `bash ~/muse-chatgpt/restore.sh` |
+| `Connection timed out` | VM was replaced, processes gone; the hook restarts them within a minute | no hook yet: `message keepalive`; meanwhile `bash ~/muse-chatgpt/restore.sh` |
 | `Session terminated` | MCP restarted while the tunnel held the old session | `restore.sh` (restarts MCP, then tunnel) |
 | `/healthz` and `/readyz` green, nothing works | they are local; the control-plane poll can still fail | trust only the report verdict |
 | "No logs" | systemd mode logs to journald | `journalctl -u muse-chatgpt-tunnel --since "-10 min"` |
@@ -124,7 +126,7 @@ Gate: never create the ChatGPT plugin before the report says OK - ChatGPT then s
 - **A-level is not available.** The observed Muse runtime exposes no "deliver a message to the agent and return its answer" interface (internal sockets reject HTTP, the sandbox API returns 403, the MCP bridges point agent -> tools). Do not simulate it; report it as NOT VERIFIED.
 - **The VM side is a link test**, not a toolset: two tools, one fixed command, no shell. Say so when reporting.
 - **No usable-but-unreadable secret channel exists here.** The attachment is an ordinary file on the Muse VM; the Muse agent could read it. Hence Restricted (Tunnels only), 30 days, and rotation via `restore.sh`.
-- **The VM is disposable.** Units under `/etc` can vanish with the VM; `~/muse-chatgpt` survives, so `restore.sh` lives there.
+- **The VM is disposable.** Units under `/etc` vanish with the VM; `~/muse-chatgpt` survives, so `restore.sh` lives there and the Muse hook calls it. Muse docs do not say whether hooks survive a swap; while the VM sleeps nothing runs.
 
 ## Hard rules
 

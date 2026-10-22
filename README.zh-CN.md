@@ -18,7 +18,7 @@ ChatGPT 多出一个插件，里面两个工具真的在你的 Muse VM 上执行
 ## 工作方式
 
 1. **Platform**（platform.openai.com）：新建一条唯一命名的隧道，关联你的 ChatGPT 工作区；建一把受限 API Key（只有 Tunnels：读取 + 使用，30 天）。
-2. **Muse**：发一条消息，Key 作为文件附件。Muse 从本仓库的发布 tag 下载 `install.sh` + `muse-mcp.py` 在自己的 VM 上运行：官方 `tunnel-client`（校验 SHA256）、一个极小的 MCP 服务、连通判定。
+2. **Muse**：发一条消息，Key 作为文件附件。Muse 从本仓库的发布 tag 下载 `install.sh` + `muse-mcp.py` 在自己的 VM 上运行：官方 `tunnel-client`（校验 SHA256）、一个极小的 MCP 服务、连通判定。还会注册一个 Muse hook：Muse 换机后自动把连接重新拉起来。
 3. **ChatGPT**：基于这条隧道建自定义 MCP 插件（无需身份验证）并连接。
 4. **验收**：用新 token 调两次工具，再看 VM 自己的日志里这条隧道转发了这两次调用。
 
@@ -76,6 +76,7 @@ cp -r muse-chatgpt-setup-skill/skills/muse-chatgpt-setup ~/.codex/skills/
 
 - 只创建和操作带本次唯一名称的对象；你已有的隧道、Key、插件和 VM 服务不碰。不属于本流程的审批卡留给你处理。
 - 隧道 ID 不是秘密，Key 是。Key 不进聊天正文、URL、命令行、日志、截图；读页面只取这一步需要的元素，并对 token 打码。
+- 换机后由 Muse hook（`~/hooks/scripts/muse-chatgpt-keepalive.sh`，每 60 秒）运行 `restore.sh`；只有重启失败才唤醒 Muse agent。VM 休眠时什么都不跑，ChatGPT 的调用要等 Muse 被唤醒。
 - VM 上 Key 存在 `~/muse-chatgpt/run/control-plane.env`（`0600`），由 systemd 的 `EnvironmentFile=` 或启动脚本加载，从不出现在命令行里。
 
 ## 实测记录

@@ -100,6 +100,27 @@ check "exit 0" '[ "$(rc t8)" = 0 ]'
 runinst t8b bash "$DIR/restore.sh" stop
 check "stop leaves no processes" '[ "$(procs)" = 0 ]'
 
+echo "T10 keepalive: leaves a stopped install alone, restarts after a VM swap, wakes once on failure"
+HK="$WORK/hooks"; mkdir -p "$HK/runtime" "$HK/scripts"
+cat > "$HK/runtime/hatch_hook_runtime.sh" <<'EOF'
+silent() { printf 'HATCH_HOOK_RESULT:{"decision":"silent","reason":"%s"}\n' "$1"; }
+wake()   { printf 'HATCH_HOOK_RESULT:{"decision":"wake","reason":"%s"}\n' "$1"; }
+EOF
+cp "$DIR/muse-hook.sh" "$HK/scripts/muse-chatgpt-keepalive.sh"
+hook() { env NO_SYSTEMD=1 TUNNEL_CLIENT_BIN="$MOCK" VERIFY_TIMEOUT="${VT:-20}" "$@" bash "$HK/scripts/muse-chatgpt-keepalive.sh" 2>&1 | tail -n 1; }
+check "stopped install: silent, nothing started" 'hook | grep -q "\"silent\".*stopped on purpose" && [ "$(procs)" = 0 ]'
+runinst t10 bash "$DIR/restore.sh"
+check "running: silent" 'hook | grep -q "\"silent\".*running"'
+kill "$(cat "$DIR/run/mcp.pid")" "$(cat "$DIR/run/tunnel.pid")"; sleep 1
+check "dry run after a swap only reports" 'hook HATCH_HOOK_DRY_RUN=1 | grep -q "would run restore.sh" && [ "$(procs)" = 0 ]'
+check "after a swap: restarted, silent, 2 processes" 'hook | grep -q "\"silent\".*restarted" && [ "$(procs)" = 2 ]'
+bash "$DIR/restore.sh" stop >/dev/null 2>&1; rm -f "$DIR/run/stopped"
+printf 'CONTROL_PLANE_API_KEY=%s\n' "$KEY_BAD" > "$DIR/run/control-plane.env"
+check "restart fails: wake once" 'hook | grep -q "\"wake\".*KEY REJECTED"'
+check "still failing: silent, no retry storm" 'hook | grep -q "\"silent\".*still failing"'
+check "keepalive output carries no key" '! grep -rqF "$KEY_BAD" "$DIR/logs/keepalive.log"'
+bash "$DIR/restore.sh" stop >/dev/null 2>&1
+
 echo "T9 download path: checksum verified against SHA256SUMS.txt (local mirror)"
 MIR="$WORK/mirror/v9.9.9-test"; mkdir -p "$MIR" "$WORK/zipsrc"
 cp "$MOCK" "$WORK/zipsrc/tunnel-client"

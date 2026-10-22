@@ -18,7 +18,7 @@ This is a **link test**: it proves ChatGPT -> tunnel -> Muse VM -> back works. I
 ## How it works
 
 1. **Platform** (platform.openai.com): a new tunnel with a unique name, linked to your ChatGPT workspace, and a Restricted API key (Tunnels: Read + Use only, 30 days).
-2. **Muse**: one message with the key attached as a file. Muse downloads `install.sh` + `muse-mcp.py` from this repo's release tag and runs them on its VM: official `tunnel-client` (checksum-verified), a tiny MCP server, a connectivity check.
+2. **Muse**: one message with the key attached as a file. Muse downloads `install.sh` + `muse-mcp.py` from this repo's release tag and runs them on its VM: official `tunnel-client` (checksum-verified), a tiny MCP server, a connectivity check. It also registers a Muse hook that restarts the connection by itself after Muse replaces the VM.
 3. **ChatGPT**: a custom MCP plugin over that tunnel (no authentication), connected.
 4. **Proof**: two tool calls with fresh tokens, plus the VM's own log lines showing this tunnel forwarded them.
 
@@ -76,6 +76,7 @@ cp -r muse-chatgpt-setup-skill/skills/muse-chatgpt-setup ~/.codex/skills/
 
 - Only objects with this run's unique names are created or touched; your existing tunnels, keys, plugins and VM services are left alone. Approval cards that are not this setup's are left for you.
 - Tunnel IDs are not secret; the key is. It never appears in chat text, URLs, command lines, logs or screenshots, and page reads are limited to the elements a step needs, with tokens redacted.
+- After a VM swap a Muse hook (`~/hooks/scripts/muse-chatgpt-keepalive.sh`, every 60 s) runs `restore.sh`; it wakes the Muse agent only when a restart fails. While the VM is asleep nothing runs, so ChatGPT calls wait until Muse wakes it.
 - On the VM the key lives in `~/muse-chatgpt/run/control-plane.env` (`0600`), loaded by systemd `EnvironmentFile=` or by the start script - never on a command line.
 
 ## Measured results

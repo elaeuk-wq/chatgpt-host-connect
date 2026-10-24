@@ -33,9 +33,9 @@ export function browserProfileRoots(system = process.platform, home = os.homedir
       .map(p => path.win32.join(base, p));
   }
   if (system === 'darwin') return ['Google/Chrome','Google/Chrome Beta','Microsoft Edge','Chromium']
-    .map(p => path.join(home, 'Library/Application Support', p));
+    .map(p => path.posix.join(home, 'Library/Application Support', p));
   return ['google-chrome','google-chrome-beta','microsoft-edge','chromium']
-    .map(p => path.join(env.XDG_CONFIG_HOME || path.join(home,'.config'),p));
+    .map(p => path.posix.join(env.XDG_CONFIG_HOME || path.posix.join(home,'.config'),p));
 }
 
 async function wsFromHttp(base) {

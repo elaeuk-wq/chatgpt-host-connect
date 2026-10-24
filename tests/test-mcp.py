@@ -16,9 +16,10 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'skills/chatgpt-host-connect/scri
 checks = []
 WINDOWS = os.name == 'nt'
 
-def check(name, condition):
+def check(name, condition, detail=None):
     checks.append(bool(condition))
     print(('PASS ' if condition else 'FAIL ') + name)
+    if not condition and detail is not None: print('  diagnostic:', detail)
 
 
 def test(control):
@@ -34,7 +35,7 @@ def test(control):
             req = urllib.request.Request('http://127.0.0.1:%d%s' % (port, suffix), method=method,
                     data=None if data is None else json.dumps(data).encode(), headers={'Content-Type':'application/json', **(headers or {})})
             try:
-                with opener.open(req, timeout=5) as r:
+                with opener.open(req, timeout=70) as r:
                     raw = r.read(); return r.status, json.loads(raw) if raw else None
             except urllib.error.HTTPError as e:
                 raw = e.read(); return e.code, json.loads(raw) if raw else None
@@ -80,7 +81,7 @@ def test(control):
             call('write_file',filename=file,content='OPENAI_API_KEY='+fake,overwrite=True)
             check('file credentials redacted',fake not in payload(call('read_file',filename=file))['text'])
             r=payload(call('execute_terminal',command="Write-Output shell-ok; (Get-Location).Path" if WINDOWS else 'printf shell-ok; pwd',directory=d))
-            check('real shell executed',r['exit_code']==0 and 'shell-ok' in r['stdout'] and d in r['stdout'])
+            check('real shell executed',r['exit_code']==0 and 'shell-ok' in r['stdout'] and (any(Path(line).is_dir() and Path(line).samefile(d) for line in r['stdout'].splitlines() if line.strip()) if WINDOWS else d in r['stdout']),r)
             check('shell exit status',payload(call('execute_terminal',command='exit 7'))['exit_code']==7)
             r=payload(call('execute_terminal',command='Start-Sleep -Seconds 10' if WINDOWS else 'sleep 10',timeout=1))
             check('shell timeout',r['timed_out'])

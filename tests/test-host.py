@@ -89,7 +89,12 @@ class HostTests(unittest.TestCase):
         key='sk-good-'+'a'*30
         q=dict(name='test',tunnel_id='tunnel_'+'a'*32,key=key,manager='launchd',allow_control=True,control_plane_proxy='http://proxy.example:18080',probe_source=(SRC/'host-mcp.py').read_text())
         with patch.object(h.platform,'system',return_value='Darwin'),patch.object(h,'manager_preflight'),patch.object(h,'client_binary',return_value=str(MOCK)),patch.object(h,'stop',side_effect=self.stop_children),patch.object(h,'start_component',side_effect=self.start):
-            result=h.install(q)
+            try:
+                result=h.install(q)
+            except Exception:
+                log=h.root_for(q)/'mcp.log'
+                if log.exists(): print('Isolated MCP startup log:',log.read_text(errors='replace')[-3000:])
+                raise
             self.assertTrue(result['installed'])
             root=h.root_for(q);c=h.owned_config(root)
             for _ in range(30):

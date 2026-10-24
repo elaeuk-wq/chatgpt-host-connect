@@ -117,7 +117,8 @@ class Portability(unittest.TestCase):
         # Task Scheduler validates the XML in memory; never registers/starts a task.
         xml=h.windows_task_xml(self.config(),'mcp').decode()
         code="$ErrorActionPreference='Stop'; $s=New-Object -ComObject Schedule.Service; $s.Connect(); $d=$s.NewTask(0); $d.XmlText="+rt.ps_quote(xml)
-        self.assertEqual(rt.powershell(code).returncode,0)
+        result=rt.powershell(code)
+        self.assertEqual(result.returncode,0,result.stderr)
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

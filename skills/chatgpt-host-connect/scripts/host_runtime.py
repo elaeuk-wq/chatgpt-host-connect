@@ -12,6 +12,7 @@ import time
 
 def powershell(script, timeout=30):
     exe = str(Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32/WindowsPowerShell/v1.0/powershell.exe')
+    script = "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); " + script
     return subprocess.run([exe, '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
                            base64.b64encode(script.encode('utf-16le')).decode()],
                           capture_output=True, text=True, encoding='utf-8', timeout=timeout)
@@ -42,8 +43,10 @@ foreach($id in @($sid.Value,'S-1-5-18','S-1-5-32-544')) {
 }
 Set-Acl -LiteralPath $p -AclObject $acl
 """
-    if powershell(script).returncode:
-        raise RuntimeError('Cannot protect the installation directory with a private Windows ACL')
+    result = powershell(script)
+    if result.returncode:
+        # This script contains only a path and ACL identities, never credentials.
+        raise RuntimeError('Cannot protect the installation directory with a private Windows ACL: ' + result.stderr[-3000:])
 
 
 def private_file_ok(path):

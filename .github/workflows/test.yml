@@ -23,10 +23,11 @@ jobs:
           python-version: '3.13'
       - uses: browser-actions/setup-chrome@v1
         id: chrome
-      - name: Python runtime and platform contracts
-        run: |
-          python tests/test-mcp.py
-          python tests/test-portability.py
+      - name: Python MCP contracts
+        run: python tests/test-mcp.py
+      - name: Python platform contracts
+        if: ${{ !cancelled() }}
+        run: python tests/test-portability.py
       - name: POSIX installer contracts
         if: runner.os != 'Windows'
         run: python tests/test-host.py

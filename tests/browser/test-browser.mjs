@@ -29,7 +29,7 @@ const CHROME = process.env.CHROME || [
   path.join(process.env.PROGRAMFILES || 'C:\\Program Files','Google/Chrome/Application/chrome.exe'),
   path.join(process.env.LOCALAPPDATA || os.homedir(),'Google/Chrome/Application/chrome.exe'),
 ].find((p) => fs.existsSync(p));
-if (!CHROME) { console.log('SKIP: no Chrome found (set CHROME=)'); process.exit(0); }
+if (!CHROME) throw new Error('No Chrome found (set CHROME=); browser contracts were not tested');
 
 let pass = 0, fail = 0;
 const check = (name, cond, extra) => { if (cond) { pass++; console.log('  PASS ' + name); } else { fail++; console.log('  FAIL ' + name + (extra ? ' :: ' + JSON.stringify(extra).slice(0, 600) : '')); } };
@@ -38,7 +38,10 @@ const FX = await freePort();
 const CDP = await freePort();
 const fixture = spawn(process.execPath, [path.join(HERE, 'fixture-server.mjs'), String(FX)], { stdio: ['ignore', 'pipe', 'inherit'] });
 const profile = fs.mkdtempSync(path.join(WORK, 'chrome-profile-'));
-const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${CDP}`, `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--window-size=1400,1000', 'about:blank'], { stdio: 'ignore' });
+let chromeDiagnostic = '';
+const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${CDP}`, `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--window-size=1400,1000', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+chrome.stderr.on('data', chunk => { chromeDiagnostic = (chromeDiagnostic + chunk).slice(-5000); });
+chrome.on('error', err => { chromeDiagnostic += String(err); });
 const cleanup = () => {
   try { chrome.kill(); } catch {}
   try { fixture.kill(); } catch {}
@@ -48,7 +51,13 @@ process.on('exit', cleanup);
 
 const FXURL = `http://127.0.0.1:${FX}`;
 const api = async (p, body) => (await fetch(`${FXURL}/api/${p}`, { method: body ? 'POST' : 'GET', headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })).json();
-for (let i = 0; i < 60; i++) { try { await fetch(`http://127.0.0.1:${CDP}/json/version`); await api('config'); break; } catch { await sleep(250); } }
+let browserReady = false;
+for (let i = 0; i < 60; i++) {
+  if (chrome.exitCode !== null) break;
+  try { await fetch(`http://127.0.0.1:${CDP}/json/version`); await api('config'); browserReady = true; break; }
+  catch { await sleep(250); }
+}
+if (!browserReady) throw new Error(`Isolated Chrome did not start (exit ${chrome.exitCode}): ${chromeDiagnostic}`);
 
 let ALL_OUT = '';
 function cli(stateFile, ...args) {

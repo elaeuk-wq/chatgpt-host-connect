@@ -121,7 +121,7 @@ def call_tool(name, args):
                 raise ValueError('content must be a UTF-8 string <=128 KiB')
             if type(args.get('overwrite', False)) is not bool:
                 raise ValueError('overwrite must be boolean')
-            with p.open('w' if args.get('overwrite') else 'x', encoding='utf-8') as f:
+            with p.open('w' if args.get('overwrite') else 'x', encoding='utf-8', newline='') as f:
                 f.write(content)
             result = {'path': str(p), 'bytes': len(content.encode())}
         else:

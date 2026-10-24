@@ -16,7 +16,7 @@ import net from 'node:net';
 import { resolveWsUrl } from './cdp.mjs';
 
 const [endpoint, sockPath] = process.argv.slice(2);
-const IDLE = Number(process.env.MUSE_SETUP_RELAY_IDLE_MS || 10 * 60 * 1000);
+const IDLE = Number(process.env.HOST_SETUP_RELAY_IDLE_MS || 10 * 60 * 1000);
 const statusFile = `${sockPath}.status`;
 const status = (o) => { try { fs.writeFileSync(statusFile, JSON.stringify({ pid: process.pid, ...o }), { mode: 0o600 }); } catch { /* ignore */ } };
 

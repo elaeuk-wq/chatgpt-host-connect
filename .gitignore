@@ -5,6 +5,7 @@
 *.key
 *-key.txt
 control-plane*.txt
+runtime-key
 secrets/
 run/
 tunnel.pid
@@ -15,4 +16,5 @@ __pycache__/
 *.pyc
 
 # local state of the browser driver
-.muse-chatgpt-setup/
+.chatgpt-host-setup/
+.chatgpt-host-connect/

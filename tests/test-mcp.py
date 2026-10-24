@@ -1,105 +1,100 @@
 #!/usr/bin/env python3
-"""Offline protocol test for scripts/muse-mcp.py. Usage: python3 tests/test-mcp.py"""
+"""Exercise real HTTP MCP in a temporary directory, no real credentials."""
+import hashlib
 import json
 import os
+from pathlib import Path
 import socket
 import subprocess
 import sys
+import tempfile
 import time
-import urllib.error
 import urllib.request
+import urllib.error
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-SERVER = os.path.join(HERE, "..", "skills", "muse-chatgpt-setup", "scripts", "muse-mcp.py")
+SCRIPT = Path(__file__).resolve().parents[1] / 'skills/chatgpt-host-connect/scripts/host-mcp.py'
+checks = []
+WINDOWS = os.name == 'nt'
 
-s = socket.socket(); s.bind(("127.0.0.1", 0)); PORT = s.getsockname()[1]; s.close()
-URL = "http://127.0.0.1:%d/mcp" % PORT
-proc = subprocess.Popen([sys.executable, SERVER], env=dict(os.environ, MCP_PORT=str(PORT)),
-                        stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
-results = []
-
-
-def check(name, cond):
-    results.append(bool(cond))
-    print(("  PASS " if cond else "  FAIL ") + name)
+def check(name, condition):
+    checks.append(bool(condition))
+    print(('PASS ' if condition else 'FAIL ') + name)
 
 
-def http(method, body=None, url=URL):
-    data = None if body is None else json.dumps(body).encode()
-    req = urllib.request.Request(url, data=data, method=method,
-                                 headers={"Content-Type": "application/json",
-                                          "Accept": "application/json, text/event-stream"})
-    try:
-        r = urllib.request.urlopen(req, timeout=5)
-        raw = r.read()
-        return r.status, dict(r.headers), (json.loads(raw) if raw else None)
-    except urllib.error.HTTPError as e:
-        raw = e.read()
-        return e.code, dict(e.headers), (json.loads(raw) if raw else None)
-
-
-try:
-    for _ in range(50):
+def test(control):
+    with tempfile.TemporaryDirectory(prefix='host-mcp-test-') as d:
+        with socket.socket() as s:
+            s.bind(('127.0.0.1', 0)); port = s.getsockname()[1]
+        log = Path(d) / 'mcp.log'
+        env = dict(os.environ, MCP_PORT=str(port), MCP_HOST_ID='test-host', MCP_ALLOW_CONTROL=str(int(control)))
+        with log.open('wb') as out:
+            p = subprocess.Popen([sys.executable, str(SCRIPT)], env=env, stderr=out)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        def request(method='POST', data=None, suffix='/mcp', headers=None):
+            req = urllib.request.Request('http://127.0.0.1:%d%s' % (port, suffix), method=method,
+                    data=None if data is None else json.dumps(data).encode(), headers={'Content-Type':'application/json', **(headers or {})})
+            try:
+                with opener.open(req, timeout=5) as r:
+                    raw = r.read(); return r.status, json.loads(raw) if raw else None
+            except urllib.error.HTTPError as e:
+                raw = e.read(); return e.code, json.loads(raw) if raw else None
+        def rpc(method, params=None):
+            return request(data={'jsonrpc':'2.0','id':1,'method':method,'params':params or {}})[1]
+        def call(name, **args):
+            return rpc('tools/call', {'name':name,'arguments':args})['result']
+        def payload(r):
+            return json.loads(r['content'][0]['text'])
         try:
-            socket.create_connection(("127.0.0.1", PORT), 0.2).close(); break
-        except OSError:
-            time.sleep(0.1)
+            for _ in range(60):
+                try:
+                    _, h = request('GET', suffix='/healthz'); break
+                except OSError:
+                    time.sleep(0.05)
+            check('health identity/control %s' % control, h['host_id']=='test-host' and h['control']==control)
+            r=rpc('initialize',{'protocolVersion':'2025-03-26'})
+            check('initialize negotiated protocol',r['result']['protocolVersion']=='2025-03-26')
+            names={t['name'] for t in rpc('tools/list')['result']['tools']}
+            check('tool surface %s' % control, names==({'host_ping','host_probe','execute_terminal','read_file','write_file','list_directory'} if control else {'host_ping','host_probe'}))
+            check('stateless ping',rpc('ping')['result']=={})
+            check('notification 202',request(data={'jsonrpc':'2.0','method':'notifications/initialized'})[0]==202)
+            check('invalid JSON-RPC value rejected',request(data='bad')[1]['error']['code']==-32600)
+            check('unknown method',rpc('not/a/method')['error']['code']==-32601)
+            check('GET MCP is POST-only',request('GET')[0]==405)
+            check('browser origin refused',request('GET',suffix='/healthz',headers={'Origin':'https://evil.example'})[0]==403)
+            check('DNS rebinding host refused',request('GET',suffix='/healthz',headers={'Host':'evil.example'})[0]==403)
+            tokens=['hcs-0123456789abcdef','hcs-fedcba9876543210']
+            replies=[payload(call('host_probe',echo_token=t)) for t in tokens]
+            check('two live results same host',all(r['host_id']=='test-host' and r['echo_token']==t for r,t in zip(replies,tokens)) and replies[0]['utc']!=replies[1]['utc'])
+            check('token hashes in host log',all(hashlib.sha256(t.encode()).hexdigest() in log.read_text() for t in tokens))
+            check('raw tokens not logged',all(t not in log.read_text() for t in tokens))
+            check('bad probe args rejected',call('host_probe',echo_token='x'*257)['isError'])
+            if not control:
+                check('shell disabled without authorization',call('execute_terminal',command='true')['isError']); return
+            file=str(Path(d)/'note.txt')
+            check('file write',not call('write_file',filename=file,content='hello\n')['isError'])
+            check('overwrite requires explicit flag',call('write_file',filename=file,content='wrong')['isError'])
+            check('file read',payload(call('read_file',filename=file))['text']=='hello\n')
+            check('read_file has no nested content envelope', 'content' not in payload(call('read_file',filename=file)))
+            check('directory listing',any(x['name']=='note.txt' for x in payload(call('list_directory',directory=d))))
+            fake='sk-'+'x'*30
+            call('write_file',filename=file,content='OPENAI_API_KEY='+fake,overwrite=True)
+            check('file credentials redacted',fake not in payload(call('read_file',filename=file))['text'])
+            r=payload(call('execute_terminal',command="Write-Output shell-ok; (Get-Location).Path" if WINDOWS else 'printf shell-ok; pwd',directory=d))
+            check('real shell executed',r['exit_code']==0 and 'shell-ok' in r['stdout'] and d in r['stdout'])
+            check('shell exit status',payload(call('execute_terminal',command='exit 7'))['exit_code']==7)
+            r=payload(call('execute_terminal',command='Start-Sleep -Seconds 10' if WINDOWS else 'sleep 10',timeout=1))
+            check('shell timeout',r['timed_out'])
+            if not WINDOWS:
+                r=payload(call('execute_terminal',command='exec 1>&- 2>&-; sleep 10',timeout=1))
+                check('timeout even after pipes close',r['timed_out'])
+            r=payload(call('execute_terminal',command="[Console]::Write('x' * 300000)" if WINDOWS else 'yes x | head -c 300000'))
+            check('output bounded',r['truncated'] and len(r['stdout'])<=131072)
+            check('negative offset rejected',call('read_file',filename=file,offset=-1)['isError'])
+        finally:
+            p.terminate(); p.wait(timeout=5)
 
-    st, h, b = http("POST", {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                             "params": {"protocolVersion": "2025-06-18", "capabilities": {},
-                                        "clientInfo": {"name": "t", "version": "0"}}})
-    check("initialize -> 200 + protocolVersion echoed", st == 200 and b["result"]["protocolVersion"] == "2025-06-18")
-    check("initialize -> MCP-Session-Id header", any(k.lower() == "mcp-session-id" for k in h))
-    check("initialize -> tools capability", "tools" in b["result"]["capabilities"])
 
-    st, _, b = http("POST", {"jsonrpc": "2.0", "method": "notifications/initialized"})
-    check("notifications/initialized -> 202, empty body", st == 202 and b is None)
-
-    st, _, b = http("POST", {"jsonrpc": "2.0", "id": 2, "method": "ping"})
-    check("ping -> 200 + empty result", st == 200 and b == {"jsonrpc": "2.0", "id": 2, "result": {}})
-
-    st, _, b = http("POST", {"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
-    names = sorted(t["name"] for t in b["result"]["tools"])
-    check("tools/list -> muse_ping, muse_vm_exec", names == ["muse_ping", "muse_vm_exec"])
-
-    st, _, b = http("POST", {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
-                             "params": {"name": "muse_ping", "arguments": {}}})
-    check("tools/call muse_ping -> pong", json.loads(b["result"]["content"][0]["text"])["pong"] is True)
-
-    payloads = []
-    for i, tok in enumerate(("tok-a1", "tok-b2")):
-        st, _, b = http("POST", {"jsonrpc": "2.0", "id": 10 + i, "method": "tools/call",
-                                 "params": {"name": "muse_vm_exec",
-                                            "arguments": {"command": "status_echo", "echo_token": tok}}})
-        p = json.loads(b["result"]["content"][0]["text"])
-        payloads.append(p)
-        check("tools/call muse_vm_exec echoes %s, has hostname+utc" % tok,
-              b["result"]["isError"] is False and p["echo_token"] == tok and p["hostname"] and p["utc"].endswith("Z"))
-        if i == 0:
-            time.sleep(1.1)
-    check("two calls return different utc", payloads[0]["utc"] != payloads[1]["utc"])
-
-    st, _, b = http("POST", {"jsonrpc": "2.0", "id": 20, "method": "tools/call",
-                             "params": {"name": "muse_vm_exec", "arguments": {"command": "rm -rf /"}}})
-    check("non-whitelisted command refused", b["result"]["isError"] is True and "refused" in b["result"]["content"][0]["text"])
-
-    st, _, b = http("POST", {"jsonrpc": "2.0", "id": 21, "method": "no/such"})
-    check("unknown method -> -32601", b["error"]["code"] == -32601)
-
-    st, h, _ = http("GET")
-    check("GET /mcp -> 405 with Allow: POST", st == 405 and h.get("Allow") == "POST")
-    st, _, _ = http("DELETE")
-    check("DELETE /mcp -> 405", st == 405)
-    st, _, b = http("GET", url="http://127.0.0.1:%d/healthz" % PORT)
-    check("GET /healthz -> 200", st == 200 and b["status"] == "ok")
-
-    st, _, b = http("POST", [{"jsonrpc": "2.0", "id": 30, "method": "ping"},
-                             {"jsonrpc": "2.0", "method": "notifications/initialized"}])
-    check("batch -> one response for the one request", st == 200 and isinstance(b, list) and len(b) == 1)
-finally:
-    proc.terminate()
-    err = proc.communicate(timeout=5)[1].decode()
-
-check("log lines carry UTC timestamps", all(l[:4].isdigit() and "Z " in l[:40] for l in err.strip().splitlines()))
-print("\nresult: %d passed, %d failed" % (results.count(True), results.count(False)))
-sys.exit(0 if all(results) else 1)
+test(False)
+test(True)
+print('result: %d passed, %d failed' % (sum(checks),len(checks)-sum(checks)))
+sys.exit(0 if all(checks) else 1)

@@ -46,10 +46,14 @@ def log(level, msg, **kv):
 
 
 ref = flag("--control-plane.api-key") or ""
-if not ref.startswith("env:"):
-    log("ERROR", "api key reference must be env:VAR in this mock")
+if ref.startswith("file:"):
+    with open(ref[5:]) as f:
+        key = f.read().strip()
+elif ref.startswith("env:"):
+    key = os.environ.get(ref[4:], "")
+else:
+    log("ERROR", "api key reference must be file:PATH or env:VAR")
     sys.exit(1)
-key = os.environ.get(ref[4:], "")
 if not key:
     log("ERROR", "environment variable is empty", var=ref[4:])
     sys.exit(1)

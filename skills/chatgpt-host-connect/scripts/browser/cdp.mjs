@@ -9,6 +9,10 @@
 //    and redacted (API keys, JWT-like tokens, long opaque strings). The single
 //    exception is readSecretInput(), whose result is never printed.
 
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import os from 'node:os';
+
 export class StepError extends Error {
   constructor(message, info = {}) {
     super(message);
@@ -22,43 +26,56 @@ export { sleep };
 // ---------------------------------------------------------------- browser
 // Profile dirs whose DevToolsActivePort is written when remote debugging is
 // switched on from chrome://inspect/#remote-debugging (the everyday profile).
-function activePortFiles() {
-  const home = process.env.HOME || '';
-  const mac = `${home}/Library/Application Support`;
-  const linux = `${home}/.config`;
-  return [
-    `${mac}/Google/Chrome`, `${mac}/Google/Chrome Beta`, `${mac}/Google/Chrome Canary`, `${mac}/Chromium`,
-    `${linux}/google-chrome`, `${linux}/google-chrome-beta`, `${linux}/chromium`,
-  ].map((d) => `${d}/DevToolsActivePort`);
-}
-
-async function wsFromActivePort() {
-  const { readFile } = await import('node:fs/promises');
-  for (const f of activePortFiles()) {
-    try {
-      const [port, path] = (await readFile(f, 'utf8')).split('\n').map((s) => s.trim());
-      if (port && path) return `ws://127.0.0.1:${port}${path}`;
-    } catch { /* not this profile */ }
+export function browserProfileRoots(system = process.platform, home = os.homedir(), env = process.env) {
+  if (system === 'win32') {
+    const base = env.LOCALAPPDATA || path.win32.join(home, 'AppData', 'Local');
+    return ['Google/Chrome/User Data','Google/Chrome Beta/User Data','Microsoft/Edge/User Data','Chromium/User Data']
+      .map(p => path.win32.join(base, p));
   }
-  return null;
+  if (system === 'darwin') return ['Google/Chrome','Google/Chrome Beta','Microsoft Edge','Chromium']
+    .map(p => path.join(home, 'Library/Application Support', p));
+  return ['google-chrome','google-chrome-beta','microsoft-edge','chromium']
+    .map(p => path.join(env.XDG_CONFIG_HOME || path.join(home,'.config'),p));
 }
 
 async function wsFromHttp(base) {
   try {
-    const res = await fetch(base + '/json/version');
+    const res = await fetch(base + '/json/version', {signal:AbortSignal.timeout(3000)});
     return (await res.json()).webSocketDebuggerUrl;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
-// endpoint: "auto" (default), "ws://..." or "http://host:port".
-// auto = the everyday Chrome's DevToolsActivePort, then http://127.0.0.1:9222.
+// No process argv dumps, port scan or first-match selection. Explicit profile
+// confines discovery to the owner's chosen user-data-dir, including custom paths.
+export async function discoverEndpoints({profile, roots} = {}) {
+  const {readFile} = await import('node:fs/promises');
+  const candidates = [];
+  for (const dir of profile ? [path.resolve(profile)] : (roots || browserProfileRoots())) {
+    try {
+      const [port, wsPath] = (await readFile(path.join(dir,'DevToolsActivePort'),'utf8')).trim().split(/\r?\n/);
+      if (!/^[0-9]+$/.test(port) || +port < 1 || +port > 65535 || !wsPath?.startsWith('/devtools/browser/')) continue;
+      const endpoint = 'http://127.0.0.1:' + port;
+      const live = await wsFromHttp(endpoint);
+      // Ignore stale files and a port subsequently reused by another browser.
+      if (live && new URL(live).pathname === wsPath.trim()) candidates.push({endpoint, profile:dir, websocket:live});
+    } catch { /* absent/stale profile metadata is not a reason to start Chrome */ }
+  }
+  return candidates;
+}
+
 export async function resolveWsUrl(endpoint = 'auto') {
+  if (endpoint === 'auto') {
+    const candidates = await discoverEndpoints();
+    if (candidates.length > 1) throw new StepError('Several debug browsers found; select the intended profile or --cdp', {found:candidates.map(({endpoint,profile})=>({endpoint,profile}))});
+    return candidates[0]?.websocket || null;
+  }
   const base = endpoint.replace(/\/+$/, '');
-  if (base.startsWith('ws')) return base;
-  if (base === 'auto') return (await wsFromActivePort()) || (await wsFromHttp('http://127.0.0.1:9222'));
-  return wsFromHttp(base);
+  let u;
+  try { u = new URL(base); } catch { return null; }
+  if (u.username || u.password) throw new StepError('CDP URLs must not embed credentials', {});
+  if (u.protocol === 'ws:' || u.protocol === 'wss:') return base;
+  if (u.protocol === 'http:' || u.protocol === 'https:') return wsFromHttp(base);
+  return null;
 }
 
 const NO_ENDPOINT = {
@@ -69,22 +86,27 @@ const ALLOW_HINT = 'waiting for Chrome: click "Allow" on the remote-debugging pr
 
 // With `relay` (a socket path) every process shares one Chrome connection held
 // by relay.mjs, so the everyday Chrome asks for Allow once, not per command.
-export async function connect(endpoint = 'auto', { relay } = {}) {
+export async function connect(endpoint = 'auto', { relay, timeout = 90000 } = {}) {
   if (relay) return new Browser(await relayTransport(endpoint, relay));
   const url = await resolveWsUrl(endpoint);
   if (!url) throw new StepError(`cannot find a Chrome DevTools endpoint (${endpoint})`, NO_ENDPOINT);
   // The everyday profile asks the user to allow the connection; this can take a while.
   const hint = setTimeout(() => process.stderr.write(ALLOW_HINT), 3000);
   const ws = new WebSocket(url);
+  let deadline;
   try {
     await new Promise((resolve, reject) => {
+      deadline = setTimeout(() => {
+        reject(new StepError('timed out waiting for the selected browser debugging connection', NO_ENDPOINT));
+        try { ws.close(); } catch { /* unopened socket */ }
+      }, timeout);
       ws.addEventListener('open', resolve, { once: true });
       ws.addEventListener('error', () => reject(new StepError(`websocket to ${url.replace(/\/devtools\/.*/, '')} failed`, {
         expected: 'the user clicks Allow on Chrome\'s remote-debugging prompt',
       })), { once: true });
     });
   } finally {
-    clearTimeout(hint);
+    clearTimeout(hint); clearTimeout(deadline);
   }
   return new Browser(ws);
 }
@@ -125,7 +147,7 @@ async function relayTransport(endpoint, sockPath) {
   const { spawn } = await import('node:child_process');
   const statusFile = `${sockPath}.status`;
   try { fs.unlinkSync(statusFile); } catch { /* none */ }
-  const relayJs = new URL('./relay.mjs', import.meta.url).pathname;
+  const relayJs = fileURLToPath(new URL('./relay.mjs', import.meta.url));
   spawn(process.execPath, [relayJs, endpoint, sockPath], { detached: true, stdio: 'ignore' }).unref();
   const deadline = Date.now() + 180000;
   let hinted = false;
@@ -151,8 +173,8 @@ class Browser {
     ws.addEventListener('message', (ev) => {
       const msg = JSON.parse(typeof ev.data === 'string' ? ev.data : Buffer.from(ev.data).toString());
       if (msg.id && this.pending.has(msg.id)) {
-        const { resolve, reject, method } = this.pending.get(msg.id);
-        this.pending.delete(msg.id);
+        const { resolve, reject, method, timer } = this.pending.get(msg.id);
+        clearTimeout(timer); this.pending.delete(msg.id);
         if (msg.error) reject(new Error(`${method}: ${msg.error.message}`));
         else resolve(msg.result);
       } else if (msg.method) {
@@ -160,18 +182,27 @@ class Browser {
       }
     });
     ws.addEventListener('close', () => {
-      for (const { reject, method } of this.pending.values()) reject(new Error(`${method}: browser connection closed`));
+      for (const { reject, method, timer } of this.pending.values()) {
+        clearTimeout(timer); reject(new Error(`${method}: browser connection closed`));
+      }
       this.pending.clear();
     });
   }
 
-  send(method, params = {}, sessionId) {
+  send(method, params = {}, sessionId, { timeout = 10000 } = {}) {
     const id = ++this.seq;
     const payload = { id, method, params };
     if (sessionId) payload.sessionId = sessionId;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, method });
-      this.ws.send(JSON.stringify(payload));
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new StepError(`cdp_timeout: ${method} did not reply; no automatic replay`, {
+          cdp_timeout: true, next_action: 'SAME_AI_RECOVERY',
+        }));
+      }, timeout);
+      this.pending.set(id, { resolve, reject, method, timer });
+      try { this.ws.send(JSON.stringify(payload)); }
+      catch (e) { clearTimeout(timer); this.pending.delete(id); reject(e); }
     });
   }
 
@@ -192,9 +223,19 @@ class Browser {
     return page;
   }
 
-  async newPage(url) {
-    const { targetId } = await this.send('Target.createTarget', { url: 'about:blank' });
+  async newPage(url, { newWindow = false, inWindowOf } = {}) {
+    let expectedWindow;
+    if (inWindowOf) {
+      expectedWindow = (await this.send('Browser.getWindowForTarget', {targetId:inWindowOf})).windowId;
+      await this.send('Target.activateTarget', {targetId:inWindowOf});
+    }
+    const { targetId } = await this.send('Target.createTarget', { url: 'about:blank', newWindow, background: false });
+    if (expectedWindow !== undefined && (await this.send('Browser.getWindowForTarget', {targetId})).windowId !== expectedWindow) {
+      await this.send('Target.closeTarget', {targetId}); // Only our new, still-blank tab.
+      throw new StepError('page_window_mismatch: new tab did not open in the run-owned window', {next_action:'SAME_AI_RECOVERY'});
+    }
     const page = await this.attach(targetId);
+    await page.send('Page.bringToFront');
     if (url) await page.goto(url);
     return page;
   }
@@ -223,7 +264,7 @@ class Browser {
 // ---------------------------------------------------------------- in-page helpers
 // Installed into the page on demand. Everything returned is redacted + truncated.
 const HELPERS = String.raw`(() => {
-  if (window.__mcs && window.__mcs.v === 3) return;
+  if (window.__mcs && window.__mcs.v === 6) return;
   const SECRET = /sk-[A-Za-z0-9_\-]{6,}|eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-.]+|[A-Za-z0-9_\-+\/=]{40,}/g;
   const redact = (s) => String(s || '').replace(SECRET, (m) => m.startsWith('sk-') ? 'sk-[redacted]' : '[redacted]');
   const norm = (s) => String(s || '').normalize('NFKC').replace(/[​-‍﻿]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -271,7 +312,7 @@ const HELPERS = String.raw`(() => {
   };
   const DIALOGS = '[role=dialog],[role=alertdialog],dialog[open],[aria-modal=true]';
   const root = (spec) => {
-    if (spec.within) return byId(spec.within) || document.body;
+    if (spec.within) return byId(spec.within); // A vanished card must never widen scope to the whole page.
     if (spec.scope === 'dialog') {
       const ds = [...document.querySelectorAll(DIALOGS)].filter(visible);
       return ds.length ? ds[ds.length - 1] : null;
@@ -287,7 +328,8 @@ const HELPERS = String.raw`(() => {
       const v = el.getAttribute(a); if (v !== null) s[a] = v;
     }
     if (el.matches('input[type=checkbox],input[type=radio]')) s.checked = el.checked;
-    if (el.disabled) s.disabled = true;
+    if (el.matches(':disabled') || el.closest('[aria-disabled=true],[inert]') ||
+        (el.tagName === 'LABEL' && el.control?.matches(':disabled'))) s.disabled = true;
     return s;
   };
   const describe = (el, extra) => {
@@ -315,6 +357,7 @@ const HELPERS = String.raw`(() => {
       if (seen.has(el)) return; seen.add(el);
       if (!spec.hidden && !visible(el)) return;
       if (spec.exclude && el.closest(spec.exclude)) return;
+      if (spec.enabled && stateOf(el).disabled) return;
       out.push({ el, s });
     };
     for (const el of r.querySelectorAll(sel)) {
@@ -330,7 +373,10 @@ const HELPERS = String.raw`(() => {
         if (s >= 2) consider(el.closest(CLICKABLE) || el, s);
       }
     }
-    out.sort((a, b) => b.s - a.s || textOf(a.el).length - textOf(b.el).length);
+    // A tooltip wrapper with aria-haspopup is not equivalent to its real button.
+    const semantic = (el) => el.matches('button,a[href],input,select,textarea,[role=button],[role=radio],[role=checkbox],[role=tab],[role=option]') ? 2 :
+      Number(el.matches(CLICKABLE.replace(',[data-testid]', '')));
+    out.sort((a, b) => b.s - a.s || semantic(b.el) - semantic(a.el) || textOf(a.el).length - textOf(b.el).length);
     return out.slice(0, spec.limit || 10).map(({ el, s }) => describe(el, { score: s }));
   }
 
@@ -370,11 +416,13 @@ const HELPERS = String.raw`(() => {
 
   function rect(id) {
     const el = byId(id); if (!el) return null;
-    el.scrollIntoView({ block: 'center', inline: 'center' });
+    el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
     const r = el.getBoundingClientRect();
-    const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    const x = (Math.max(0, r.left) + Math.min(innerWidth, r.right)) / 2;
+    const y = (Math.max(0, r.top) + Math.min(innerHeight, r.bottom)) / 2;
     const top = document.elementFromPoint(x, y);
-    return { x, y, hit: !!top && (top === el || el.contains(top) || top.contains(el)) };
+    return { x, y, hit: !!top && (top === el || el.contains(top)),
+      visible: visible(el), disabled: !!stateOf(el).disabled };
   }
 
   function state(id) { const el = byId(id); return el ? describe(el, { selected: isSelected(el), visible: visible(el) }) : null; }
@@ -453,11 +501,34 @@ const HELPERS = String.raw`(() => {
     for (const b of btns) {
       let el = byId(b.id), card = el;
       for (let i = 0; i < 8 && card.parentElement; i++) {
-        card = card.parentElement;
+        const parent = card.parentElement;
+        if (parent.matches('body,main,[role=main],[data-message-author-role=user]') || parent.querySelector('[data-message-author-role=user]')) break;
+        card = parent;
         if ((card.innerText || '').length >= (spec.minText || 30)) break;
       }
+      const owner = norm(spec.ownerText);
+      const owns = (e) => {
+        const t = norm(e.innerText);
+        if (!owner) return true;
+        let at = t.indexOf(owner);
+        while (at >= 0) {
+          if (!/[a-z0-9_-]/.test(t[at - 1] || '') && !/[a-z0-9_-]/.test(t[at + owner.length] || '')) return true;
+          at = t.indexOf(owner, at + 1);
+        }
+        return false;
+      };
+      // Tool names/owner can be in a header above the button's immediate card.
+      // Never expand into another approval group or the user prompt/thread root.
+      const initial = card;
+      for (let i = 0; owner && !owns(card) && i < 5; i++) {
+        const parent = card.parentElement;
+        if (!parent || parent.matches('body,main,[role=main],[data-message-author-role=user]') || parent.querySelector('[data-message-author-role=user]') ||
+            btns.some(x => parent.contains(byId(x.id)) && !initial.contains(byId(x.id)))) break;
+        card = parent;
+      }
       if (seen.has(card)) continue; seen.add(card);
-      res.push({ button: b, card: tag(card), text: cut(card.innerText, 400) });
+      res.push({ button: b, card: tag(card), matchesOwner: owns(card),
+        matchesTool: !spec.toolText || norm(card.innerText).includes(norm(spec.toolText)), text: cut(card.innerText, 400) });
     }
     return res;
   }
@@ -486,7 +557,7 @@ const HELPERS = String.raw`(() => {
 
   function countText(spec) { return grep(spec).length; }
 
-  window.__mcs = { v: 3, tag, find, field, rect, state, focus, setNativeSelect, activeOption, snapshot, grep, cards, selectedIn, readSecret, countText, byId };
+  window.__mcs = { v: 6, tag, find, field, rect, state, focus, setNativeSelect, activeOption, snapshot, grep, cards, selectedIn, readSecret, countText, byId };
 })()`;
 
 const KEYS = {
@@ -508,15 +579,23 @@ export class Page {
     this.chooser = null;
   }
 
-  send(method, params) { return this.b.send(method, params, this.sid); }
+  send(method, params, options) { return this.b.send(method, params, this.sid, options); }
 
   async init() {
     await this.send('Page.enable');
     await this.send('Runtime.enable');
     await this.send('DOM.enable');
+    this.loadErrors = [];
     this.b.on((m) => {
-      if (m.sessionId === this.sid && m.method === 'Page.fileChooserOpened') this.chooser = m.params;
+      if (m.sessionId !== this.sid) return;
+      if (m.method === 'Page.fileChooserOpened') this.chooser = m.params;
+      if (m.method === 'Network.responseReceived' && ['Document','Script','Stylesheet'].includes(m.params.type) && m.params.response.status >= 400) {
+        const u = new URL(m.params.response.url);
+        this.loadErrors.push({type:m.params.type,status:m.params.response.status,url:u.origin+u.pathname});
+        this.loadErrors = this.loadErrors.slice(-8);
+      }
     });
+    await this.send('Network.enable');
   }
 
   waitEvent(method, ms = 20000) {
@@ -529,10 +608,28 @@ export class Page {
   }
 
   async goto(url) {
+    this.loadErrors = [];
     const loaded = this.waitEvent('Page.loadEventFired', 30000);
     await this.send('Page.navigate', { url });
     await loaded;
     await sleep(400);
+  }
+
+  // Node-side deadline: page timers/animation promises can themselves be frozen.
+  // Never change CSS, disable animations or transplant a submitted page to pass.
+  async ensureRendering({ timeout = 2000 } = {}) {
+    await this.send('Page.bringToFront');
+    try {
+      const r = await this.send('Runtime.evaluate', {
+        expression: 'new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))',
+        returnByValue: true, awaitPromise: true, timeout,
+      }, { timeout });
+      if (!r.exceptionDetails && r.result?.value === true) return;
+    } catch (e) { if (!e.info?.cdp_timeout) throw e; }
+    throw new StepError('page_render_stalled: selected tab is not producing animation frames', {
+      next_action: 'SAME_AI_RECOVERY', expected: 'a responsive run-owned browser window',
+      hint: 'Keep this tab and state. Do not change CSS, restart the browser, switch profiles, or loop through selectors/proxies. Resume only after the browser window is responsive.',
+    });
   }
 
   async url() { return this.eval(() => location.href); }
@@ -591,8 +688,8 @@ export class Page {
     return hits[0];
   }
 
-  async mouseClick(x, y) {
-    await this.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+  async mouseClick(x, y, { move = true } = {}) {
+    if (move) await this.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
     await this.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
     await sleep(40);
     await this.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 });
@@ -600,11 +697,32 @@ export class Page {
 
   // Real mouse click on an element (by descriptor id or by find spec).
   async click(target, opts = {}) {
-    const el = typeof target === 'string' ? { id: target } : target.id ? target : await this.findOne(target, opts);
-    let r = await this.mcs('rect', el.id);
-    if (!r) throw new StepError('element vanished before click', { expected: el.text });
-    if (!r.hit) { await sleep(300); r = (await this.mcs('rect', el.id)) || r; }
-    await this.mouseClick(r.x, r.y);
+    const spec = typeof target === 'object' && !target.id ? { ...target, enabled: true } : null;
+    let el = spec ? await this.findOne(spec, opts) : typeof target === 'string' ? { id: target } : target;
+    let previous = null, last = null;
+    const ready = await this.waitFor(async () => {
+      if (spec) el = (await this.find(spec))[0] || el;
+      const r = await this.mcs('rect', el.id);
+      last = r;
+      const stable = r?.visible && r.hit && !r.disabled && previous &&
+        Math.abs(r.x - previous.x) < 1 && Math.abs(r.y - previous.y) < 1;
+      previous = r;
+      if (!stable) return null;
+      // Hover can move/re-render a control. Recheck AFTER moving, not before it.
+      await this.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: r.x, y: r.y });
+      await sleep(60);
+      const hovered = await this.mcs('rect', el.id);
+      last = hovered; previous = hovered;
+      return hovered?.visible && hovered.hit && !hovered.disabled &&
+        Math.abs(hovered.x-r.x)<1 && Math.abs(hovered.y-r.y)<1 ? hovered : null;
+    }, { timeout: opts.timeout ?? 5000, interval: 100 });
+    if (!ready) throw new StepError('element not actionable; no click sent', {
+      expected: opts.what || el.text || 'an enabled, unobscured, stable control', found: last,
+    });
+    // Persist intent only after actionability succeeds, immediately before input.
+    // A lost CDP response is uncertain; never replay it automatically.
+    await opts.beforeDispatch?.();
+    await this.mouseClick(ready.x, ready.y, { move: false });
     await sleep(opts.settle ?? 250);
     return el;
   }

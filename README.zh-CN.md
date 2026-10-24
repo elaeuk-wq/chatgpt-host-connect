@@ -1,109 +1,90 @@
-# muse-chatgpt-setup
+# chatgpt-host-connect
 
-[English](README.md)
+**ChatGPT 连接电脑与服务器 · 试用版。** macOS、Ubuntu 已通过真实流程验证；原生 Windows 仍为实验性支持。
 
-一个 Agent 技能：通过 OpenAI Secure MCP Tunnel，把**已登录**的 ChatGPT 账号和**已登录**的 Muse 账号连起来。你粘一条提示词，agent 操作你的浏览器完成全部配置，包括测试调用。
+[English](README.md) · [技能入口](skills/chatgpt-host-connect/SKILL.md) · [MIT](LICENSE)
 
-## 能得到什么
+让**同一个 AI**把 ChatGPT 接到一台独立的 macOS、Linux 或原生 Windows 主机：配置 Tunnel/Key、部署服务、连接插件、完成一次真实工具验收。无需 Muse、第二个 AI、旧连接、作者的浏览器脚本或私人运行目录。
 
-ChatGPT 多出一个插件，里面两个工具真的在你的 Muse VM 上执行：
+## 平台边界与验证状态
 
-| 工具 | 返回 |
-|---|---|
-| `muse_ping` | `{"pong": true, "utc": ...}` |
-| `muse_vm_exec` | 执行一条白名单命令（`status_echo`）：主机名、UTC 时间、你传入的 token |
-
-这是**链路验证**：证明 ChatGPT → 隧道 → Muse VM → 返回 这条路是通的。它**不能**让 ChatGPT 和 Muse agent 对话——Muse 没有提供这种接口，技能会如实报 `NOT VERIFIED`，不会伪造。
-
-## 工作方式
-
-1. **Platform**（platform.openai.com）：新建一条唯一命名的隧道，关联你的 ChatGPT 工作区；建一把受限 API Key（只有 Tunnels：读取 + 使用，30 天）。
-2. **Muse**：发一条消息，Key 作为文件附件。Muse 从本仓库的发布 tag 下载 `install.sh` + `muse-mcp.py` 在自己的 VM 上运行：官方 `tunnel-client`（校验 SHA256）、一个极小的 MCP 服务、连通判定。还会注册一个 Muse hook：Muse 换机后自动把连接重新拉起来。
-3. **ChatGPT**：基于这条隧道建自定义 MCP 插件（无需身份验证）并连接。
-4. **验收**：用新 token 调两次工具，再看 VM 自己的日志里这条隧道转发了这两次调用。
-
-点击由脚本（`scripts/browser/muse-setup.mjs`）通过 Chrome DevTools Protocol 完成；每设一个值都读回核对（权限、有效期、工作区、选中的隧道），对不上就停下并给出准确的失败报告，由 agent 现场手动完成这一步后续跑。状态文件保证重跑安全：做完的步骤跳过，任何东西都不会建两次。按钮文字中英文都认。
-
-首次运行的目标耗时：约 5–6 分钟，大部分是 Muse 在安装。
-
-## 两种 Key 模式
-
-| | 全自动（`--mode auto`，默认） | 半自动（`--mode manual`） |
+| 目标 | 命令 / 自启动 | 验证状态 |
 |---|---|---|
-| 谁点「创建密钥」 | 脚本 | 你，然后你点「复制」 |
-| Key 怎么进本地文件 | 脚本从「保存你的密钥」弹窗读取 | 脚本读剪贴板，随后清空剪贴板 |
-| agent 的浏览器会话是否读取页面上的 Key | 是（进内存和 `0600` 文件，从不打印） | 否 |
-| 需要你做什么 | 没有，除了登录 / 验证码 / 付款 | 在 Key 弹窗点一次创建、一次复制 |
+| macOS | Bash、Python、官方 Homebrew 客户端；GUI登录后的 LaunchAgent | 当前流程已实测成功，包括同一AI补救并继续中断流程；不是全新机器或重启验证 |
+| Linux x86_64/arm64 + systemd | Bash、Python、校验官方发行物；用户服务 + 授权 linger | 当前Ubuntu流程实测六步一次完成，含一次脚本自动页面恢复、一次真实终端验收；其他发行版/架构尚未实测 |
+| 原生 Windows 10/11 x64/ARM64 | PowerShell、Python、校验官方EXE；当前用户登录计划任务 | 新增实现，**原生系统及真实端到端尚未验证**，不能宣称生产可用性与前两者相同 |
 
-两种模式下 Key 都落到本地 `0600` 文件、作为文件附件发给 Muse，不出现在聊天正文、日志或命令行里。要清楚这意味着什么：agent 进程（全自动时）和 Muse VM 上的 agent（两种模式）都有能力读到 Key。所以 Key 只给 Tunnels 权限、30 天过期；轮换只要给 Muse 发一条消息（见 `references/muse-bootstrap.md`）。
+WSL2 是用户明确选择的 Linux 目标，不能冒充原生 Windows。Mac/Windows 默认需要用户登录、机器醒着；不是无人登录的系统服务。其他系统、CPU、缺失systemd或企业政策限制应明确报告，不悄悄换系统、提权或绕过安全措施。
 
-## 前提
+工具提供命令执行、文件读写和目录查看，权限等同服务用户，**不是沙箱**。不隐含交易、提现、发布或付费推理授权。
 
-- **你日常用的 Chrome，打开远程调试**，并已登录 platform.openai.com、chatgpt.com 和 muse.ai。地址栏打开 `chrome://inspect/#remote-debugging`，把开关打开（Chrome 144 起）。每次开始运行时 Chrome 会弹窗，点一次 **允许** 即可；脚本和 AI 兜底共用这一条连接，跑完（或闲置 10 分钟）自动断开。连接地址技能自己找。
-  - 另一种：用单独的用户目录启动 Chrome：`--remote-debugging-port=9333 --user-data-dir="$HOME/.muse-chatgpt-setup/chrome"`（在里面登录一次），再传 `--cdp http://127.0.0.1:9333`。
-- agent 所在机器有 **Node.js 22+**（不需要装 npm 包）。半自动模式需要 macOS（`pbpaste`）。
-- OpenAI 账号有建隧道和 API Key 的权限；Muse VM 上有 `curl` 和 `python3`。
+## 下载后使用
 
-## 安装技能
+从 [Releases](https://github.com/elaeuk-wq/chatgpt-host-connect/releases) 下载ZIP，或克隆[仓库](https://github.com/elaeuk-wq/chatgpt-host-connect)，把完整的 [`skills/chatgpt-host-connect/`](skills/chatgpt-host-connect) 目录交给你的AI，或放进它支持的技能目录。**不要只复制 SKILL.md。** 安装位置任意，脚本按自身位置找资源，不依赖作者目录或当前工作目录。
 
-```bash
-git clone https://github.com/elaeuk-wq/muse-chatgpt-setup-skill
-# Pi
-cp -r muse-chatgpt-setup-skill/skills/muse-chatgpt-setup ~/.agents/skills/
-# Claude Code
-cp -r muse-chatgpt-setup-skill/skills/muse-chatgpt-setup ~/.claude/skills/
-# Codex
-cp -r muse-chatgpt-setup-skill/skills/muse-chatgpt-setup ~/.codex/skills/
-```
+- 控制端：Node >=22，SSH目标还需OpenSSH；缺失时由AI在授权范围内从官方/系统包管理器准备。
+- 目标端：Python >=3.9，缺失时用 Homebrew、apt/dnf 或 per-user winget 准备；无pip/npm第三方依赖。
+- Tunnel客户端来自官方包/经过SHA256校验的固定发行版，不从旧连接里找。
+- 仍需要真实账户权限、登录/MFA、必要管理员审批和浏览器调试权限。“独立安装”不等于不需要公共软件或联网。
 
-（Codex：如果你的版本从别的目录读技能，放到那个目录。）装完重启 agent 让它加载技能。
+给AI的通用提示词：
 
-## 推荐提示词
+> 读取这个技能，在我指定的电脑或服务器（本机或已授权的SSH别名）上完成一次独立接入，名称为 work-host，使用我指定的浏览器和账户。我授权必要依赖安装、新建 Tunnel、受限 Key、ChatGPT 插件和本次持久用户服务，包括Linux需要时启用linger。保护其他连接；由你完成正常配置和批准点击，真实登录/验证码/管理员权限缺失时才报告。按技能完成一次验收，分别报告配置和验收耗时、复用与新装依赖、脚本失败及补救动作。
 
-**半自动**——除了 Key 的创建和复制，其余都由 agent 完成：
+### 浏览器按用户选择接入
 
-> 用 muse-chatgpt-setup 技能，以半自动 Key 模式把我的 ChatGPT 和 Muse 连起来。我的 Chrome 已打开远程调试，并已登录 platform.openai.com、chatgpt.com 和 muse.ai。你可以新建隧道、受限 API Key、ChatGPT 插件，在我的 Muse VM 上安装连接器，并批准本流程自己的审批卡。Key 表单填好后告诉我，我自己点创建和复制；其余步骤你做完直到最终验收，最后按步骤报告 PASS/BLOCKED。
+Chrome/Edge/Chromium均通过CDP接入，不限定“chrome1”之类的私人名称。用选定的用户数据目录执行 `browser-discover`，或直接传已核实的CDP URL；不猜固定端口，不扫描任意进程/端口，不擅自重启、复制cookie或新建profile。
 
-> Use the muse-chatgpt-setup skill in semi-automatic key mode to connect my ChatGPT and Muse. My Chrome (remote debugging on) is signed in to platform.openai.com, chatgpt.com and muse.ai. You may create a new tunnel, a restricted API key, a ChatGPT plugin, install the connector on my Muse VM, and approve this setup's own approval cards. When the key form is filled, tell me and I will click Create and Copy; do everything else yourself through the final verification, then report PASS/BLOCKED per step.
+详见[跨平台浏览器接入](skills/chatgpt-host-connect/references/browser-connection.md)。
 
-**全自动**——全程不问，只在登录、验证码、付款时停下：
-
-> 用 muse-chatgpt-setup 技能，全自动把我的 ChatGPT 和 Muse 连起来。我的 Chrome 已打开远程调试，并已登录 platform.openai.com、chatgpt.com 和 muse.ai。我授权你新建隧道、受限 API Key（仅 Tunnels 读取 + 使用，30 天）和 ChatGPT 插件，在我的 Muse VM 上安装连接器，并批准本流程自己的审批卡。全程不要问我；只有需要登录、验证码或付款时才停下。最后按步骤报告 PASS/BLOCKED。
-
-> Use the muse-chatgpt-setup skill in fully automatic mode to connect my ChatGPT and Muse. My Chrome (remote debugging on) is signed in to platform.openai.com, chatgpt.com and muse.ai. I authorize you to create a new tunnel, a restricted API key (Tunnels Read + Use, 30 days), and a ChatGPT plugin, to install the connector on my Muse VM, and to approve this setup's own approval cards. Do not ask me anything; stop only if a login, CAPTCHA or payment is needed. Report PASS/BLOCKED per step at the end.
-
-## 安全
-
-- 只创建和操作带本次唯一名称的对象；你已有的隧道、Key、插件和 VM 服务不碰。不属于本流程的审批卡留给你处理。
-- 隧道 ID 不是秘密，Key 是。Key 不进聊天正文、URL、命令行、日志、截图；读页面只取这一步需要的元素，并对 token 打码。
-- 换机后由 Muse hook（`~/hooks/scripts/muse-chatgpt-keepalive.sh`，每 60 秒）运行 `restore.sh`；只有重启失败才唤醒 Muse agent。VM 休眠时什么都不跑，ChatGPT 的调用要等 Muse 被唤醒。
-- VM 上 Key 存在 `~/muse-chatgpt/run/control-plane.env`（`0600`），由 systemd 的 `EnvironmentFile=` 或启动脚本加载，从不出现在命令行里。
-
-## 实测记录
-
-_待第 2 阶段在真实账号上实跑后填写（每步耗时，两种 Key 模式）。_
-
-## 测试（离线）
+macOS/Linux控制端：
 
 ```bash
-bash tests/test-install.sh            # 用模拟 tunnel-client 测 install.sh（后台进程模式）
-python3 tests/test-mcp.py             # muse-mcp.py 协议
-node tests/browser/test-browser.mjs   # 浏览器脚本跑本地仿真页面，用一次性的无头 Chrome
+S="<skill-dir>/scripts/browser/host-connect.mjs"
+node "$S" browser-discover --browser-user-data-dir "<选定的用户数据目录>"
+node "$S" run --target local --host-name work-host --state "<私有目录>/state.json" --cdp <已核实的CDP-URL> --allow-control
 ```
 
-## 仓库结构
+Windows PowerShell控制端：
 
-```
-skills/muse-chatgpt-setup/
-├── SKILL.md                     给 agent 的操作手册
-├── references/muse-bootstrap.md 发给 Muse agent 的消息（安装、重启、换 Key、日志、排障）
-└── scripts/
-    ├── install.sh               在 Muse VM 上运行：安装 / 恢复 / 换 Key / 停止
-    ├── muse-mcp.py              极简 MCP 服务（只用标准库）
-    └── browser/                 muse-setup.mjs + CDP 驱动 + 中英文界面标签
-tests/                           离线测试和仿真页面
+```powershell
+$S = Join-Path '<skill-dir>' 'scripts/browser/host-connect.mjs'
+node $S run --target local --host-name work-host --state '<私有目录>/state.json' --cdp <已核实的CDP-URL> --allow-control
 ```
 
-## License
+远程把 `local` 改成用户已配置的SSH别名；原生Windows远端额外指定 `--target-os windows`。不能用控制端OS推断目标OS。Linux开启linger额外需要已授权的 `--enable-linger`。
 
-MIT
+## 同一套流程，只有系统边界不同
+
+`tunnel → key → host-install → host-wait → plugin → test`
+
+- 每次使用独立状态、目录、host_id、空闲回环端口和有归属标记的服务；不借用或修改其他连接。
+- POSIX目录0700/文件0600；Windows真实DACL保护。Key只在私有文件/stdin传输，不进聊天、argv或附件。
+- Windows不保存登录密码，不用SYSTEM任务；目标权限仍受UAC和系统政策约束。
+- 代理在目标侧发现或显式指定；不写死软件/端口，不把控制端localhost代理套到远端。
+- 一次完整run先行，不先审计源码或例行dry-run。技术失败由当前AI兜底：诊断、修复、验证后继续原状态，不能直接把普通操作丢给用户。每次动作仍限时，不盲重试、不重复创建；真实登录/权限缺失或无法安全解决的外部阻塞才报告。
+- 两秒检测动画帧；仅刚新建、未提交的入口冻结时，在同一指定profile内换新窗口一次。旧表单/恢复标签页不搬走，不改CSS、不重启浏览器。
+- 空白页单独报告加载失败；未提交的空白入口最多延时刷新一次，401/403不盲重试。Key恢复复用本次已有弹窗。
+- Platform/ChatGPT各用一个绑定标签页；插件创建后原页等连接，不去列表/API兜圈。
+- 原任务中确认批准卡片属于本次app，直接点**允许一次**；不打开详情、不解析JSON、不点始终允许。派发点击不算成功：五秒仍有可用批准按钮且无执行证据就报告，不盲目补点或继续空等。
+- 一次ChatGPT任务、一次终端命令：验证身份、写随机标记、读回；控制端独立核对文件和成功命令哈希。通过立即收尾，不等模型长回复。
+- 90秒阶段预算，超时复查原证据而不自动重发。仅ready/ChatGPT说成功不算完成。
+
+完整要求见 [SKILL.md](skills/chatgpt-host-connect/SKILL.md)，服务位置与故障恢复见[主机部署说明](skills/chatgpt-host-connect/references/host-bootstrap.md)。
+
+## 测试与公开发布
+
+```text
+python tests/test-mcp.py
+python tests/test-portability.py
+node tests/browser/test-portability.mjs
+node tests/browser/test-browser.mjs
+```
+
+Mac/Linux额外运行 `python3 tests/test-host.py`。浏览器测试需安装Chrome，可用 `CHROME` 指定；测试创建临时隔离无头profile，不操作用户浏览器、不访问正式账户、不使用真实Key或付费模型。服务管理调用模拟；Windows Job/ACL检查只能在原生Windows执行，计划任务XML只内存校验、不注册任务。
+
+[CI配置](.github/workflows/test.yml)覆盖三系统，但**写好CI不等于CI已经跑过**。隔离测试不代表全新机器或真实ChatGPT端到端验证。每个平台、冷安装、重启、自启的验证结果应分别报告，不把AI补救说成脚本全自动通过。
+
+技能名和CLI入口已改为 `chatgpt-host-connect`、`host-connect.mjs`。为兼容现有独立安装，默认状态目录 `~/.chatgpt-host-setup/`、主机归属标记和已安装服务名保持不变。恢复改名前的直接主机安装时，显式传入原 `--state`，不要重建。下载新版不会迁移或重启已安装主机。
+
+旧Muse状态拒绝直接复用，不迁移/停用旧连接，不自动删除Key或用户数据。脱敏只是尽力处理，不是权限隔离；只向可信账户/工作区开放控制。

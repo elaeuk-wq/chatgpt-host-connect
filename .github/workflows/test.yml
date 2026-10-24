@@ -1,0 +1,48 @@
+name: Offline portable skill tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  portable:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: browser-actions/setup-chrome@v1
+        id: chrome
+      - name: Python runtime and platform contracts
+        run: |
+          python tests/test-mcp.py
+          python tests/test-portability.py
+      - name: POSIX installer contracts
+        if: runner.os != 'Windows'
+        run: python tests/test-host.py
+      - name: Native Windows PowerShell syntax
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $errors = $null
+          Get-ChildItem skills/chatgpt-host-connect/scripts/*.ps1 | ForEach-Object {
+            $tokens = $null
+            [void][Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$tokens,[ref]$errors)
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+      - name: Node path, discovery and transport contracts
+        run: node tests/browser/test-portability.mjs
+      - name: Isolated browser workflow (no production accounts)
+        env:
+          CHROME: ${{ steps.chrome.outputs.chrome-path }}
+        run: node tests/browser/test-browser.mjs

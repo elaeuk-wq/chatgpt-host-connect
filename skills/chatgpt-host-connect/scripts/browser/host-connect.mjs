@@ -1,13 +1,13 @@
 #!/usr/bin/env node
-// muse-setup.mjs - drive a signed-in Chrome (over CDP) through the whole
-// ChatGPT <-> Muse setup. Node >= 22, no dependencies.
+// host-connect.mjs - drive a signed-in Chrome (over CDP) through the whole
+// ChatGPT <-> local/SSH host setup. Node >= 22, no dependencies.
 //
-//   node muse-setup.mjs run [--mode auto|manual] [--cdp auto|ws://...|http://host:port]
-//   node muse-setup.mjs run --dry-run            # locate elements only, no clicks
-//   node muse-setup.mjs run --from-step plugin   # resume after a manual fix
-//   node muse-setup.mjs state show|done|set|reset ...
-//   node muse-setup.mjs snapshot|click|fill|select|attach|grep ...   (fallback tools)
-//   node muse-setup.mjs key-from-clipboard | key-from-page
+//   node host-connect.mjs run [--mode auto|manual] [--cdp auto|ws://...|http://host:port]
+//   node host-connect.mjs run --dry-run            # locate elements only, no clicks
+//   node host-connect.mjs run --from-step plugin   # resume after a manual fix
+//   node host-connect.mjs state show|done|set|reset ...
+//   node host-connect.mjs snapshot|click|fill|select|attach|grep ...   (fallback tools)
+//   node host-connect.mjs key-from-clipboard | key-from-page
 //
 // stdout: one JSON object per line; the last line is the result.
 // Exit: 0 ok, 10 step failed (agent takes over), 11 user needed (login/captcha/
@@ -17,16 +17,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { connect, StepError, sleep } from './cdp.mjs';
+import { acceptanceCommand, bindTarget, hostRequest } from './host-client.mjs';
+import { connect, discoverEndpoints, StepError, sleep } from './cdp.mjs';
+import { privateDir, privateFileOk, clipboard } from './platform.mjs';
 import { LABELS as L, SELECTORS as S, mergeLabels } from './labels.mjs';
 
 
 const SELF = fileURLToPath(import.meta.url);
 const CMD = `node ${SELF}`;
 const KEY_RE = '^sk-[A-Za-z0-9_\\-]{20,}$';
-const VERDICT_RE = 'control[- ]plane\\s*[:：]\\s*(OK|PENDING|KEY REJECTED|KEY FORBIDDEN|KEY MISSING|TUNNEL EXITED|MCP FAILED TO START)';
 
 class NeedsUser extends Error { constructor(kind, info) { super(kind); this.kind = kind; this.info = info; } }
 class Refuse extends Error { constructor(msg, info) { super(msg); this.info = info; } }
@@ -39,6 +39,7 @@ function parseArgs(argv) {
     if (a.startsWith('--')) {
       const [k, v] = a.slice(2).split(/=(.*)/s);
       if (v !== undefined) opts[k] = v;
+      else if (['allow-control', 'enable-linger', 'dry-run', 'no-relay', 'cdp-files', 'rename', 'retry-test'].includes(k)) opts[k] = true;
       else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) opts[k] = argv[++i];
       else opts[k] = true;
     } else pos.push(a);
@@ -46,28 +47,40 @@ function parseArgs(argv) {
   return { cmd: pos[0], pos: pos.slice(1), opts };
 }
 const { cmd, pos, opts } = parseArgs(process.argv.slice(2));
-// Scripts the Muse VM downloads: pinned release tag (override --ref only to test an unreleased ref).
-const RELEASE_REF = opts.ref || 'v1.0.0';
-const RAW = `https://raw.githubusercontent.com/elaeuk-wq/muse-chatgpt-setup-skill/${RELEASE_REF}/skills/muse-chatgpt-setup/scripts`;
-const HOME_DIR = path.join(os.homedir(), '.muse-chatgpt-setup');
+const HOME_DIR = path.join(os.homedir(), '.chatgpt-host-setup');
 const STATE_FILE = path.resolve(opts.state || path.join(HOME_DIR, 'state.json'));
 const DATA_DIR = path.dirname(STATE_FILE);
-const CDP = opts.cdp || process.env.MUSE_SETUP_CDP || 'auto';
+let CDP = opts.cdp || process.env.HOST_SETUP_CDP || 'auto';
 // One shared Chrome connection per state dir + endpoint (see relay.mjs); the
 // everyday Chrome then asks for Allow once instead of once per command.
-const RELAY_SOCK = (() => {
+const relaySocket = () => {
   const tag = crypto.createHash('sha256').update(`${DATA_DIR}\0${CDP}`).digest('hex').slice(0, 10);
   const p = path.join(DATA_DIR, `cdp-${tag}.sock`);
-  return p.length < 100 ? p : path.join(os.tmpdir(), `muse-setup-cdp-${tag}.sock`); // Unix socket path limit
-})();
-const browserConnect = () => {
-  if (opts['no-relay']) return connect(CDP);
-  ensureDir(DATA_DIR);
-  return connect(CDP, { relay: RELAY_SOCK });
+  return p.length < 100 ? p : path.join(os.tmpdir(), `host-setup-cdp-${tag}.sock`); // Unix socket path limit
 };
+const browserConnect = () => {
+  // Windows uses one direct connection for the complete run, not an unprotected
+  // emulated Unix socket/named pipe. Dedicated CDP profiles need no relay prompt.
+  if (opts['no-relay'] || process.platform === 'win32') return connect(CDP);
+  ensureDir(DATA_DIR);
+  return connect(CDP, { relay: relaySocket() });
+};
+async function chooseBrowser() {
+  const saved = loadState().browser;
+  if (opts['browser-user-data-dir']) {
+    const found = await discoverEndpoints({profile:String(opts['browser-user-data-dir'])});
+    if (found.length !== 1) throw new StepError('Selected browser profile has no live DevToolsActivePort; specify its verified --cdp endpoint or enable debugging', {});
+    if (opts.cdp && opts.cdp !== found[0].endpoint) throw new StepError('--cdp does not match the selected profile', {});
+    CDP = found[0].endpoint;
+  } else if (!opts.cdp && !process.env.HOST_SETUP_CDP && saved) CDP = saved.endpoint;
+  if (CDP === 'auto') {
+    const found = await discoverEndpoints();
+    if (found.length !== 1) throw new StepError('Select one debug browser using --cdp or --browser-user-data-dir; no port/profile guessed', {found:found.map(({endpoint,profile})=>({endpoint,profile}))});
+    CDP = found[0].endpoint;
+  }
+}
 const URLS = {
   platform: (opts['platform-url'] || 'https://platform.openai.com').replace(/\/+$/, ''),
-  muse: (opts['muse-url'] || 'https://muse.ai').replace(/\/+$/, ''),
   chatgpt: (opts['chatgpt-url'] || 'https://chatgpt.com').replace(/\/+$/, ''),
 };
 const TIMEOUT_SCALE = Number(opts['timeout-scale'] || 1);
@@ -76,10 +89,10 @@ const split = (s) => (s === undefined || s === true ? [] : String(s).split('|').
 if (opts.labels) mergeLabels(JSON.parse(fs.readFileSync(opts.labels, 'utf8')));
 
 const emit = (o) => process.stdout.write(JSON.stringify(o) + '\n');
-const note = (m) => process.stderr.write(`[muse-setup] ${m}\n`);
+const note = (m) => process.stderr.write(`[host-setup] ${m}\n`);
 
 // ---------------------------------------------------------------- state
-function ensureDir(d) { fs.mkdirSync(d, { recursive: true, mode: 0o700 }); try { fs.chmodSync(d, 0o700); } catch { /* ignore */ } }
+function ensureDir(d) { privateDir(d); }
 function loadState() {
   if (fs.existsSync(STATE_FILE)) return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
   const d = new Date();
@@ -87,7 +100,7 @@ function loadState() {
   const id = `${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}-${crypto.randomBytes(2).toString('hex')}`;
   return {
     version: 1, run_id: id, created_at: d.toISOString(),
-    names: { tunnel: `muse-chatgpt-${id}`, key: `muse-chatgpt-${id}`, plugin: `Muse VM ${id}` },
+    names: { tunnel: `chatgpt-host-${id}`, key: `chatgpt-host-${id}`, plugin: `Host ${id}` },
     key_file: path.join(DATA_DIR, 'keys', `control-plane-key-${id}.txt`),
     steps: {},
   };
@@ -104,14 +117,15 @@ const outputsOf = (st) => Object.assign({}, ...Object.values(st.steps).map((s) =
 function writeKeyFile(file, key) {
   if (!new RegExp(KEY_RE).test(key)) throw new StepError('value does not look like an API key (sk-...)', { expected: 'an sk-... key' });
   ensureDir(path.dirname(file));
-  fs.writeFileSync(file, `CONTROL_PLANE_API_KEY=${key}\n`, { mode: 0o600 });
-  fs.chmodSync(file, 0o600);
+  if (fs.existsSync(file) && fs.lstatSync(file).isSymbolicLink()) throw new Error('Refusing symlink key file');
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, `CONTROL_PLANE_API_KEY=${key}\n`, { mode: 0o600, flag:'wx' });
+  fs.renameSync(tmp,file);
   return crypto.createHash('sha256').update(key).digest('hex').slice(0, 8);
 }
 function keyFileOk(file) {
   try {
-    const stt = fs.statSync(file);
-    if ((stt.mode & 0o077) !== 0) return false;
+    if (!privateFileOk(file)) return false;
     return /^CONTROL_PLANE_API_KEY=sk-[A-Za-z0-9_-]{20,}\n?$/.test(fs.readFileSync(file, 'utf8'));
   } catch { return false; }
 }
@@ -119,55 +133,15 @@ function shred(file) {
   try { const n = fs.statSync(file).size; fs.writeFileSync(file, Buffer.alloc(n)); fs.unlinkSync(file); return true; } catch { return false; }
 }
 const clip = {
-  read() { return execFileSync('pbpaste', { encoding: 'utf8' }).trim(); },
-  clear() { execFileSync('pbcopy', { input: '' }); },
+  read() { return clipboard(); },
+  clear() { clipboard(true); },
   hash() { try { return crypto.createHash('sha256').update(clip.read()).digest('hex'); } catch { return ''; } },
 };
 
-// ---------------------------------------------------------------- messages
-// The Muse hook restarts the install after a VM swap (only the agent's hooks tool can register it).
-const KEEPALIVE_LINES = [
-  'report 里是 control-plane  : OK 之后，设置换机后自动恢复：',
-  'mkdir -p ~/hooks/scripts && cp ~/muse-chatgpt/muse-hook.sh ~/hooks/scripts/muse-chatgpt-keepalive.sh',
-  '用你的 hooks 工具注册它：id=muse-chatgpt-keepalive，script_path=~/hooks/scripts/muse-chatgpt-keepalive.sh，poll_interval_secs=60，' +
-    'prompt=「muse-chatgpt 自动恢复失败。读 ~/muse-chatgpt/logs/keepalive.log 最后 40 行，用两句话告诉我原因和要我做什么（比如批准 api.openai.com 出网、换 Key）。不要改配置，不要输出密钥。」',
-  '先 dry_run，结果是 silent 再 enable。已有同 id 的 hook 就用 update，不要重复建。',
-];
-function museInstallMessage(o) {
-  return [
-    '请在这台机器上安装一条到 ChatGPT 的连接，全部装在 ~/muse-chatgpt，不要动其他服务。',
-    '',
-    `附件 ${path.basename(o.key_file)} 是 API Key 文件：不要打开、不要打印或复述它的内容。先找到它在这台机器上的路径，记为 KEY_PATH。`,
-    '',
-    '然后原样执行（不要改脚本，不要自己重写实现）：',
-    '',
-    'mkdir -p ~/muse-chatgpt && cd ~/muse-chatgpt',
-    `curl -fsSL ${RAW}/install.sh -o install.sh`,
-    `curl -fsSL ${RAW}/muse-mcp.py -o muse-mcp.py`,
-    `TUNNEL_ID=${o.tunnel_id} KEY_FILE="$KEY_PATH" CONSUME_KEY_FILE=1 bash install.sh`,
-    '',
-    '如果弹出允许访问 api.openai.com 的审批，选长期允许。',
-    '',
-    ...KEEPALIVE_LINES,
-    '',
-    '装完只回复脚本最后 report 段的原文（两条横线之间的内容），再加一行 keepalive: enabled（没启用就写原因），不要输出任何密钥。',
-  ].join('\n');
-}
-const MUSE_KEEPALIVE_MESSAGE = [
-  '给 ~/muse-chatgpt 加上换机后自动恢复，不要动其他服务。先原样执行（更新安装脚本并重启，会生成 ~/muse-chatgpt/muse-hook.sh）：',
-  `cd ~/muse-chatgpt && curl -fsSL ${RAW}/install.sh -o install.sh && bash restore.sh`,
-  ...KEEPALIVE_LINES,
-  '只回复 report 段原文，再加一行 keepalive: enabled（没启用就写原因）。',
-].join('\n');
-const MUSE_RESTORE_MESSAGE = '审批已处理。请运行 bash ~/muse-chatgpt/restore.sh ，只回复 report 段原文。';
-const MUSE_LOGS_MESSAGE = [
-  '只回报事实，不要改任何配置。运行下面两条命令并原样贴出输出：',
-  '',
-  "{ grep -h 'dispatcher forwarded' ~/muse-chatgpt/logs/tunnel.log 2>/dev/null; journalctl -u muse-chatgpt-tunnel.service --since '-30 min' -o cat --no-pager 2>/dev/null | grep 'dispatcher forwarded'; } | tail -4",
-  "{ grep -h 'tools/call' ~/muse-chatgpt/logs/mcp.log 2>/dev/null; journalctl -u muse-chatgpt-mcp.service --since '-30 min' -o cat --no-pager 2>/dev/null | grep 'tools/call'; } | tail -4",
-].join('\n');
-const testPrompt = (plugin, tok) =>
-  `Use the "${plugin}" app. Call its tool muse_vm_exec with command status_echo and echo_token ${tok}. Reply with only the raw JSON text the tool returned, unchanged.`;
+// ---------------------------------------------------------------- host verification
+const testPrompt = (plugin, command) =>
+  `Use only the "${plugin}" app. Call execute_terminal exactly once with this JSON argument object, unchanged: ${JSON.stringify({command, timeout:20})}. It checks host identity and writes/reads one small acceptance file. Do not call host_probe or other tools, do not repeat the command. Briefly report its result.`;
+const reEsc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // ---------------------------------------------------------------- page helpers
 async function checkBlockers(page, site) {
@@ -177,11 +151,54 @@ async function checkBlockers(page, site) {
   if (cap) throw new NeedsUser('captcha', { site, url: url.split('?')[0] });
 }
 
-// Find the entry element of a step; when missing, decide whether the user is needed.
+async function pageLoadState(page) {
+  const view = await page.eval(() => ({
+    blank: !(document.body?.innerText || '').trim() && !document.querySelector('button,input,textarea,[contenteditable=true]'),
+    dialogs: [...document.querySelectorAll('[role=dialog],dialog[open],[aria-modal=true]')].filter(e=>e.getClientRects().length).length,
+  }));
+  return {...view, resources:page.loadErrors || []};
+}
+function loadingError(view) {
+  return new StepError('page_load_failed: page content did not load; no object submitted', {
+    found:view, expected:'a rendered page with the required visible, enabled control', next_action:'SAME_AI_RECOVERY',
+    hint:view.resources.some(r=>[401,403].includes(r.status)) ?
+      'The required control did not become usable within its normal wait, and page resources were denied. Keep this tab; check the reported access/session/network failure without repeated refreshes or blind account/proxy changes.' :
+      'One safe reload was exhausted. Inspect network/site errors; this is not a missing-button failure.',
+  });
+}
+
+// Only an untouched, blank entry page may be reloaded once. Never reload a form,
+// submitted object or chat task; 401/403 are not blindly retried.
 async function entry(page, site, spec, what, timeout = T(12000)) {
   await checkBlockers(page, site);
-  const hit = await page.waitFor(() => page.find(spec), { timeout });
-  if (hit) return hit[0];
+  // A failed subresource is diagnostic evidence, not proof the whole UI failed.
+  // Observe the original tab for the existing budget; never refetch/bypass it.
+  const usable = {...spec,enabled:true};
+  let hit = await page.waitFor(() => page.find(usable), {timeout});
+  if (hit) {
+    await checkBlockers(page,site);
+    const denied = (page.loadErrors || []).filter(r=>[401,403].includes(r.status));
+    if (denied.length) emit({event:'page_resource_warning',site,resources:denied,required_control_ready:true,reloaded:false});
+    return hit[0];
+  }
+  await checkBlockers(page,site);
+  let view = await pageLoadState(page);
+  if (view.resources.some(r=>[401,403].includes(r.status))) throw loadingError(view);
+  if (view.blank && !view.dialogs) {
+    emit({event:'page_reload',reason:'blank_entry_page',site,attempt:1});
+    await sleep(T(1500));
+    await page.goto(await page.url());
+    await checkBlockers(page,site);
+    hit = await page.waitFor(() => page.find(usable), {timeout});
+    await checkBlockers(page,site);
+    if (hit) {
+      const denied = (page.loadErrors || []).filter(r=>[401,403].includes(r.status));
+      if (denied.length) emit({event:'page_resource_warning',site,resources:denied,required_control_ready:true,reloaded:true});
+      return hit[0];
+    }
+    view = await pageLoadState(page);
+    if (view.blank || view.resources.some(r=>[401,403].includes(r.status))) throw loadingError(view);
+  }
   await checkBlockers(page, site);
   const login = await page.find({ text: L.common.login, limit: 1 });
   if (login.length) throw new NeedsUser('login', { site, url: (await page.url()).split('?')[0], seen: login[0].text });
@@ -275,33 +292,46 @@ const STEPS = [
     run: stepKey, recover: recoverKey,
   },
   {
-    name: 'muse-install', creates: false, site: 'muse',
-    required: { muse_chat_url: /^https?:\/\// },
+    name: 'host-install', creates: false, site: 'host',
+    required: { host_id: /./, hostname: /./, root: /./ },
     manual: (c) => ({
-      do: [
-        `Open ${URLS.muse} in a new chat`,
-        `Attach the key file ${c.state.key_file} (never paste its content)`,
-        `Paste the message in ${path.join(DATA_DIR, 'muse-install-message.txt')} and send it`,
-      ],
-      verify: ['the sent message and the attachment chip are visible in the chat'],
-      record: `${CMD} state done muse-install muse_chat_url=<url of that chat>`,
+      do: [`Install directly on ${c.state.target.alias}; no second AI or chat attachment.`,
+           `Run: ${CMD} host install --state "${STATE_FILE}" --allow-control`,
+           'Or follow references/host-bootstrap.md for agent-directed deployment; record the verified host identity.'],
+      verify: ['MCP exposes shell/file tools as the intended login user', 'credentials stored privately; only loopback listeners'],
+      record: `${CMD} host install records this step after checking the result`,
     }),
-    locate: async (c, page) => locateComposer(page, 'muse', true),
-    run: stepMuseInstall, recover: recoverMuseInstall,
+    run: async (c) => {
+      if ((c.opts['host-mode'] || 'script') !== 'script') {
+        const err = new NeedsUser('agent_host_setup', {});
+        err.message = 'Current AI should perform host installation, then resume; no Muse handoff';
+        throw err;
+      }
+      return hostRequest(c.state, c.opts, 'install', c.out);
+    },
   },
   {
-    name: 'muse-wait', creates: false, site: 'muse',
+    name: 'host-wait', creates: false, site: 'host',
     required: { control_plane: /^OK$/ },
-    manual: (c) => ({
-      do: [
-        `Open the Muse chat ${c.out.muse_chat_url || ''}`,
-        'Approve only the card for api.openai.com with the long-lived option (More allow options -> Always allow this site); leave other cards to the user',
-        'If the report says PENDING after approving, ask Muse to run: bash ~/muse-chatgpt/restore.sh',
-      ],
-      verify: ['the latest Muse reply contains the report line "control-plane  : OK"'],
-      record: `${CMD} state done muse-wait control_plane=OK`,
+    manual: () => ({
+      do: [`${CMD} host status --state "${STATE_FILE}"`],
+      verify: ['this installation identity matches and its control-plane poll is fresh'],
+      record: 'Resume run; host-wait checks the target directly, never trusts a pasted OK.',
     }),
-    run: stepMuseWait,
+    run: async (c) => {
+      const end = Date.now() + T(90000);
+      let r;
+      for (let attempt = 0; Date.now() < end; attempt++) {
+        r = hostRequest(c.state, { ...c.opts, _hostTimeoutMs: end - Date.now() }, 'status', c.out);
+        if (r.host_id !== c.out.host_id || r.hostname !== c.out.hostname) throw new Error('Target host identity changed');
+        if (r.control_plane === 'OK') return r;
+        await sleep(Math.min(T(Math.min(10000, 2000 * (attempt + 1))), Math.max(0, end - Date.now())));
+      }
+      throw new StepError('Installed services have no fresh control-plane poll within 90 seconds', {
+        found: { mcp_ok: r?.mcp_ok, control_plane: r?.control_plane },
+        hint: 'Inspect owned service/network/credentials, then resume host-wait. Do not reinstall or create another tunnel.',
+      });
+    },
   },
   {
     name: 'plugin', creates: true, site: 'chatgpt',
@@ -310,9 +340,9 @@ const STEPS = [
       do: [
         `Open ${URLS.chatgpt}/plugins -> Add -> Add custom MCP server`,
         `Only if no plugin named "${c.names.plugin}" exists: Name "${c.names.plugin}", Connection Tunnel -> chip "${c.out.tunnel_name}", Authentication: No authentication, tick "I understand", Create`,
-        `On the consent screen click "Connect ${c.names.plugin}"`,
+        `After Create, stay on that same tab until creation finishes and "Connect ${c.names.plugin}" appears; click it once and wait for this app's connection confirmation. Do not reopen the list or API page.`,
       ],
-      verify: [`the selected tunnel chip is "${c.out.tunnel_name}" and the id field shows ${c.out.tunnel_id}`, 'the plugin is listed as installed AND connected'],
+      verify: [`the selected tunnel chip is "${c.out.tunnel_name}" and the id field shows ${c.out.tunnel_id}`, 'the current page confirms this specific app is connected (e.g. <name> 现已连接); an Installed list heading is not proof'],
       record: `${CMD} state done plugin plugin_name="${c.names.plugin}"`,
     }),
     locate: async (c, page) => [await locate(page, 'chatgpt', { text: L.chatgpt.add }, 'plugins Add button')],
@@ -320,28 +350,15 @@ const STEPS = [
   },
   {
     name: 'test', creates: false, site: 'chatgpt',
-    required: { token1: /./, token2: /./, utc1: /./, utc2: /./ },
+    required: { verified: /^true$/, verification_version: /^2$/, token: /^hcs-[a-f0-9]{16}$/ },
     manual: (c) => ({
-      do: [
-        `New chat at ${URLS.chatgpt}; enable the "${c.out.plugin_name}" plugin in the composer if needed`,
-        'Ask it to call muse_vm_exec (command status_echo) with a fresh random echo_token and to paste the raw JSON; approve only this plugin\'s tool card',
-        'Repeat once with a different token',
-      ],
-      verify: ['each reply echoes its token verbatim', 'the two utc values differ'],
-      record: `${CMD} state done test token1=<t1> utc1=<u1> token2=<t2> utc2=<u2> hostname=<h>`,
+      do: [`Inspect the single acceptance task for "${c.out.plugin_name}". Fix only the reported blocker; do not resend or repeat passed checks.`,
+           `Resume --from-step test to recheck existing evidence; use --retry-test only if a new task is necessary.`],
+      verify: ['correct host identity, one successful shell command, random marker written/read, matching host-side execution log'],
+      record: 'The test step checks target evidence automatically; no manual PASS.',
     }),
     locate: async (c, page) => locateComposer(page, 'chatgpt', false),
     run: stepTest,
-  },
-  {
-    name: 'logs', creates: false, site: 'muse',
-    required: { forwarded: /./ },
-    manual: (c) => ({
-      do: [`In the Muse chat ${c.out.muse_chat_url || ''}, send the message printed by: ${CMD} message logs`],
-      verify: [`a "dispatcher forwarded command to MCP server" line for tunnel ${c.out.tunnel_id}`, 'an MCP "tools/call" line at about the same time'],
-      record: `${CMD} state done logs forwarded=yes`,
-    }),
-    run: stepLogs,
   },
 ];
 const STEP_NAMES = STEPS.map((s) => s.name);
@@ -359,11 +376,6 @@ async function locateComposer(page, site, withAttach) {
   const res = [];
   try { const c = await composer(page, site); res.push({ what: 'composer', found: true, tag: c.tag }); } catch (e) {
     res.push({ what: 'composer', found: false, hint: e instanceof NeedsUser ? `needs ${e.kind}` : undefined });
-  }
-  if (withAttach) {
-    const input = await page.find({ css: 'input[type=file]', text: [], hidden: true });
-    const btn = await page.find({ text: L.muse.attach });
-    res.push({ what: 'attachment (file input or attach button)', found: !!(input.length || btn.length), detail: input.length ? 'file input' : btn[0]?.text });
   }
   return res;
 }
@@ -412,8 +424,8 @@ async function pickWorkspace(page, c, closeOn) {
 }
 
 async function submitEnabled(page, labels, what) {
-  const btn = (await page.find({ scope: 'dialog', text: labels, css: 'button,[role=button],input[type=submit]', limit: 1 }))[0];
-  if (!btn || btn.state?.disabled || btn.state?.['aria-disabled'] === 'true') {
+  const btn = await page.waitFor(async () => (await page.find({ scope: 'dialog', text: labels, css: 'button,[role=button],input[type=submit]', enabled: true }))[0], { timeout: T(10000) });
+  if (!btn) {
     throw new StepError(`${what} is disabled - a required field is empty or invalid`, { expected: `${what} enabled`, found: await page.snapshot({ scope: 'dialog' }) });
   }
 }
@@ -438,14 +450,21 @@ async function ensureWorkspace(page, c, name, workspace) {
 async function stepTunnel(c) {
   const page = await c.open('platform', '/settings/organization/tunnels');
   const name = c.names.tunnel;
-  await entry(page, 'platform', { text: L.platform.createTunnel }, 'Create tunnel button');
+  const createTrigger = { text: L.platform.createTunnel, css: 'button,[role=button]', enabled: true };
+  await entry(page, 'platform', createTrigger, 'Create tunnel button');
   if (await tunnelRow(page, name)) throw new Refuse(`a tunnel named ${name} already exists but is not in the state file`, { record: STEPS[0].manual(c).record });
-  await page.click({ text: L.platform.createTunnel }, { what: 'Create tunnel', settle: 600 });
+  await page.click(createTrigger, { what: 'Create tunnel', settle: 0 });
   await payWall(page);
+  const form = await page.waitFor(() => page.field({ scope: 'dialog', label: L.platform.tunnelName }), { timeout: T(10000) });
+  if (!form && (await pageLoadState(page)).blank) throw loadingError(await pageLoadState(page));
+  if (!form) throw new StepError('Create tunnel did not open its form; no tunnel submitted', {
+    expected: 'visible creation dialog with the tunnel name field',
+    hint: 'Inspect the actual button/dialog on this tab before retrying; do not record this as submitted.',
+  });
   const nameField = await page.fill({ scope: 'dialog', label: L.platform.tunnelName }, name, { what: 'tunnel name' });
   let workspace = await pickWorkspace(page, c, nameField?.id);
   const desc = (await page.field({ scope: 'dialog', label: L.platform.tunnelDescription }))[0];
-  if (desc) await page.fill({ scope: 'dialog', label: L.platform.tunnelDescription }, 'ChatGPT to Muse VM link (muse-chatgpt-setup)', { what: 'tunnel description' });
+  if (desc) await page.fill({ scope: 'dialog', label: L.platform.tunnelDescription }, 'ChatGPT direct host control (chatgpt-host-connect)', { what: 'tunnel description' });
   await submitEnabled(page, L.platform.createSubmit, 'Create (tunnel dialog)');
   // ids already on the page: the new tunnel's id must not be one of them
   const before = new Set((await page.grep({ re: 'tunnel_[A-Za-z0-9]{6,}', hidden: true })).flatMap((l) => l.match(/tunnel_[A-Za-z0-9]{6,}/g) || []));
@@ -500,15 +519,17 @@ async function rowTrigger(page, labels) {
     const d = [...document.querySelectorAll('[role=dialog],[aria-modal=true],dialog[open]')].find((e) => e.getClientRects().length) || document.body;
     const n = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
     for (const lab of d.querySelectorAll('label,button,span,div,p')) {
-      if (!a.names.includes(n(lab.innerText))) continue;
+      if (!lab.getClientRects().length || !a.names.includes(n(lab.innerText))) continue;
       const own = lab.closest(a.trig);
       if (own && own !== lab) return window.__mcs.tag(own);
       if (lab.matches(a.trig)) continue;
       let row = lab;
       for (let i = 0; i < 4 && row.parentElement; i++) {
         row = row.parentElement;
-        const t = row.querySelector(a.trig);
-        if (t) return window.__mcs.tag(t);
+        const triggers = [...row.querySelectorAll(a.trig)].filter(e=>e.getClientRects().length);
+        if (triggers.length === 1) return window.__mcs.tag(triggers[0]);
+        // Never climb into the entire form and mistake another field for this row.
+        if (triggers.length > 1) break;
       }
     }
     return null;
@@ -552,29 +573,51 @@ async function triggerText(page, labels) {
 
 async function fillKeyForm(page, c, name) {
   await page.fill({ scope: 'dialog', label: L.platform.keyName }, name, { what: 'key name' });
-  const proj = await rowTrigger(page, L.platform.project);
-  let project = null;
-  if (proj) {
-    const shown = norm((await page.state(proj))?.text);
-    if (c.opts.project || !shown || /select|choose|选择/.test(shown)) {
-      [project] = await pickOptions(page, proj, c.opts.project ? [[c.opts.project]] : null, { what: 'project', preferred: L.platform.defaultProject });
-    } else project = shown;
+  const enabledTrigger = async (labels) => {
+    const id = await rowTrigger(page, labels);
+    const st = id && await page.state(id);
+    return st?.visible && !st.state?.disabled && st.state?.['aria-disabled'] !== 'true' ? id : null;
+  };
+  const proj = await page.waitFor(() => enabledTrigger(L.platform.project), {timeout:T(5000)});
+  if (!proj) throw new StepError('project field not available; no key submitted', {
+    expected:'a visible, enabled project selector in the owned key form',
+    found:await page.snapshot({scope:'dialog'}),
+  });
+  const shown = norm((await page.state(proj))?.text);
+  let project = shown;
+  if ((c.opts.project && norm(c.opts.project) !== shown) || !shown || /select|choose|选择/.test(shown)) {
+    [project] = await pickOptions(page, proj, c.opts.project ? [[c.opts.project]] : null, {what:'project',preferred:L.platform.defaultProject});
   }
+  // A closed option list/click acknowledgment is not a committed selection.
+  // Re-find the trigger because the site may remount it after the selection.
+  const committed = await page.waitFor(async () => {
+    const id = await rowTrigger(page, L.platform.project);
+    const st = id && await page.state(id);
+    return st?.visible && st.state?.['aria-expanded'] !== 'true' && norm(st.text) === norm(project);
+  }, {timeout:T(5000)});
+  if (!committed) throw new StepError('project selection did not take effect; no key submitted', {
+    expected:`project selector shows ${project}`, found:await triggerText(page,L.platform.project),
+    hint:'Keep the owned form. Do not repeat the option click blindly or continue to expiry/permissions.',
+  });
+  const exp = await page.waitFor(() => enabledTrigger(L.platform.expiry), {timeout:T(5000)});
+  if (!exp) throw new StepError('expiration field not available after confirmed project selection', {
+    expected:'an enabled expiration field',found:{project:await triggerText(page,L.platform.project),expiry:await triggerText(page,L.platform.expiry)},
+  });
+  await pickOptions(page, exp, [L.platform.expiry30], { what: 'expiration' });
   const restricted = await page.findOne({ scope: 'dialog', text: L.platform.restricted, css: '[role=radio],button,label' }, { what: 'Permissions: Restricted' });
-  await page.click(restricted.id, { settle: 600 });
-  const tun = await rowTrigger(page, L.platform.tunnelsRow);
+  if (restricted.state?.['aria-checked'] !== 'true' && restricted.state?.['data-state'] !== 'on') await page.click(restricted.id, { settle: 300 });
+  const tun = await page.waitFor(() => rowTrigger(page, L.platform.tunnelsRow), { timeout: T(5000) });
   if (!tun) throw new StepError('"Tunnels" permission row not found', { expected: 'a Tunnels row under Restricted permissions', found: await page.snapshot({ scope: 'dialog' }) });
   await pickOptions(page, tun, [L.platform.tunnelsUse, L.platform.tunnelsRead], { what: 'Tunnels permission' });
-  const exp = await page.waitFor(async () => { const id = await rowTrigger(page, L.platform.expiry); return id && (await page.state(id))?.state?.['aria-disabled'] !== 'true' ? id : null; }, { timeout: T(5000) });
-  if (!exp) throw new StepError('expiration field not available', { expected: 'an enabled expiration field (it unlocks after a project is chosen)', found: await page.snapshot({ scope: 'dialog' }) });
-  await pickOptions(page, exp, [L.platform.expiry30], { what: 'expiration' });
   return project;
 }
 
 // Readback: Restricted on; Tunnels shows Read + Use; every other resource None;
 // expiry 30 days; the footer counts exactly the two Tunnels permissions.
-async function verifyKeyForm(page) {
+async function verifyKeyForm(page, expectedProject) {
   const problems = [];
+  const project = await triggerText(page,L.platform.project);
+  if (!expectedProject || project !== norm(expectedProject)) problems.push('project selection changed or is missing');
   const r = (await page.find({ scope: 'dialog', text: L.platform.restricted, css: '[role=radio],button', limit: 1 }))[0];
   if (r?.state?.['aria-checked'] !== 'true' && r?.state?.['data-state'] !== 'on') problems.push('Permissions is not Restricted');
   const tun = await triggerText(page, L.platform.tunnelsRow);
@@ -598,18 +641,41 @@ async function verifyKeyForm(page) {
   if (!/30/.test(exp || '')) problems.push(`expiry shows "${exp}", not 30 days`);
   const count = (await page.grep({ scope: 'dialog', re: '(\\d+)\\s*(selected permissions?|个已选权限|项已选权限)' }))[0];
   if (count && !/\b2\b/.test(count)) problems.push(`footer says "${count}" (expected 2: Tunnels Read + Use)`);
-  return { problems, seen: { tunnels: tun, expiry: exp, footer: count || null } };
+  return { problems, seen: { project, tunnels: tun, expiry: exp, footer: count || null } };
 }
 
 async function stepKey(c) {
   const page = await c.open('platform', '/settings/organization/api-keys');
   const name = c.names.key;
-  await entry(page, 'platform', { text: L.platform.createKey }, 'Create new secret key button');
-  if (await keyRow(page, name)) throw new Refuse(`a key named ${name} already exists but is not recorded`, { record: STEPS[1].manual(c).record });
-  await page.click({ text: L.platform.createKey }, { what: 'Create new secret key', settle: 700 });
-  await payWall(page);
+  const form = c.state.steps.key.form;
+  const nameFields = await page.field({label:L.platform.keyName,css:'[role=dialog] input,[aria-modal=true] input,dialog[open] input'});
+  const dialogs = (await pageLoadState(page)).dialogs;
+  if (dialogs) {
+    if (!nameFields.length || form?.target_id !== page.targetId) throw new StepError('An unowned or unexpected dialog is open; no background Create click sent', {
+      hint:'Inspect the bound tab; resume only this run\'s key form. Do not click through an overlay or create another key.',
+    });
+    // Resume our existing form; a portaled selection list must be closed first.
+    const expanded = await page.eval(() => {
+      const dialog=[...document.querySelectorAll('[role=dialog],[aria-modal=true],dialog[open]')].find(e=>e.querySelector('input'));
+      const el=dialog?.querySelector('[aria-expanded=true]');
+      return el ? window.__mcs.tag(el) : null;
+    });
+    if (expanded) await page.click(expanded,{settle:0});
+  } else {
+    await entry(page, 'platform', { text: L.platform.createKey, css:'button,[role=button]',enabled:true }, 'Create new secret key button');
+    if (await keyRow(page, name)) throw new Refuse(`a key named ${name} already exists but is not recorded`, { record: STEPS[1].manual(c).record });
+    c.state.steps.key.form = {target_id:page.targetId}; c.save();
+    await page.click({ text: L.platform.createKey, css:'button,[role=button]' }, { what: 'Create new secret key', settle: 0 });
+    await payWall(page);
+    const field = await page.waitFor(()=>page.field({scope:'dialog',label:L.platform.keyName}),{timeout:T(10000)});
+    if (!field) {
+      const view=await pageLoadState(page);
+      if(view.blank) throw loadingError(view);
+      throw new StepError('Key creation form did not open; no key submitted', {});
+    }
+  }
   const projectShown = await fillKeyForm(page, c, name);
-  const v = await verifyKeyForm(page);
+  const v = await verifyKeyForm(page, projectShown);
   if (v.problems.length) throw new StepError('key form readback does not match', { expected: 'Restricted; Tunnels Read + Use only; 30 days', problems: v.problems, found: v.seen });
   await submitEnabled(page, L.platform.createKeySubmit, 'Create secret key');
 
@@ -650,6 +716,11 @@ async function stepKey(c) {
 async function recoverKey(c) {
   if (keyFileOk(c.state.key_file)) return { key_name: c.names.key, key_file: c.state.key_file, recovered: true };
   const page = await c.open('platform', '/settings/organization/api-keys');
+  const visibleKey = await page.readSecretInput(KEY_RE, 'dialog');
+  if (visibleKey && c.state.steps.key.form?.target_id === page.targetId) {
+    const fp = writeKeyFile(c.state.key_file,visibleKey);
+    return {key_name:c.names.key,key_file:c.state.key_file,key_fp:fp,recovered:true};
+  }
   await entry(page, 'platform', { text: L.platform.createKey }, 'key list');
   const row = await keyRow(page, c.names.key);
   if (row) {
@@ -663,169 +734,82 @@ async function recoverKey(c) {
   return null;
 }
 
-// ---------------------------------------------------------------- muse
-const reEsc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-// A freshly reset Muse shows "Muse正在连接…" while its VM starts; messages sent
-// then are dropped ("未确认送达"). Wait for that status to go away first.
-async function museConnected(page) {
-  // The status lives in a role=status announcer plus truncated labels; read them directly.
-  const status = () => page.eval((a) => {
-    const re = new RegExp(a.re, 'i');
-    const ann = document.querySelector('[data-hatch-connection-status-announcer],[role=status][aria-live]');
-    if (ann && re.test(ann.textContent)) return ann.textContent.trim();
-    const leaf = [...document.querySelectorAll('span,div,p')].find((e) => e.children.length === 0 && re.test(e.textContent) && e.getClientRects().length);
-    return leaf ? leaf.textContent.trim() : null;
-  }, { re: L.muse.connecting.map(reEsc).join('|') });
-  if (!(await status())) return;
-  note('Muse is still connecting (fresh VM?) - waiting up to 5 min');
-  const ok = await page.waitFor(async () => !(await status()), { timeout: T(300000), interval: 3000 });
-  if (!ok) throw new StepError('Muse is still connecting', { expected: 'Muse ready (no "connecting" status)', found: [await status()], hint: 'reload the Muse chat; after a reset its VM can take a while to start' });
-}
-
-async function stepMuseInstall(c) {
-  if (!keyFileOk(c.state.key_file)) throw new StepError('key file missing or not 0600', { expected: c.state.key_file });
-  const page = await c.open('muse', '/');
-  await checkBlockers(page, 'muse');
-  const nc = (await page.find({ text: L.muse.newChat, limit: 1 }))[0];
-  if (nc) await page.click(nc.id, { settle: 800 });
-  const comp = await composer(page, 'muse');
-  await museConnected(page);
-  // Muse drops messages whose file was set over CDP; use the real open panel
-  // (--cdp-files only for the offline fixtures, which have no macOS panel).
-  if (opts['cdp-files']) await page.setFiles([c.state.key_file], { buttonSpec: { text: L.muse.attach, exclude: '[role=dialog]' }, what: 'attach button' });
-  else await page.nativeFiles(c.state.key_file, { what: 'Muse attachment' });
-  const base = path.basename(c.state.key_file);
-  // Muse renders the name as two spans ("control-plane-key-…" + ".txt"): match the stem.
-  const stem = base.replace(/\.[^.]+$/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const chip = await page.waitFor(() => page.grep({ re: stem, exclude: 'textarea,script,style' }), { timeout: T(15000) });
-  if (!chip) throw new StepError('attachment did not appear', { expected: `a chip named ${base}`, found: await page.snapshot({ text: [base] }) });
-  const msg = museInstallMessage({ key_file: c.state.key_file, tunnel_id: c.out.tunnel_id });
-  fs.writeFileSync(path.join(DATA_DIR, 'muse-install-message.txt'), msg + '\n', { mode: 0o600 });
-  await typeMessage(page, 'muse', msg);
-  c.submitted();
-  await sendMessage(page, 'muse', L.muse.send, comp);
-  const sent = await page.waitFor(() => page.grep({ re: c.out.tunnel_id }), { timeout: T(8000) });
-  if (!sent) throw new StepError('sent message not visible', { expected: `a message containing ${c.out.tunnel_id}` });
-  // The bubble shows at once; Muse marks it undelivered a few seconds later if the server did not take it.
-  await sleep(T(6000));
-  const undelivered = await page.grep({ re: L.muse.undelivered.map(reEsc).join('|') });
-  if (undelivered.length) {
-    c.submitted('running'); // not stored by Muse: the next run sends it again
-    throw new StepError('Muse did not accept the message', { expected: 'the install message delivered', found: undelivered, hint: 'a freshly reset Muse may still be starting; reload the chat, check it answers a short message, then rerun' });
-  }
-  return { muse_chat_url: (await page.url()).split('#')[0], sent_at: new Date().toISOString() };
-}
-
-async function recoverMuseInstall(c) {
-  // The install message was sent before; find the chat that holds it instead of sending again.
-  for (const t of await c.browser.pages()) {
-    if (!t.url.startsWith(URLS.muse)) continue;
-    const page = await c.browser.attach(t.targetId);
-    if ((await page.grep({ re: c.out.tunnel_id })).length) return { muse_chat_url: t.url.split('#')[0], recovered: true };
-  }
-  return null;
-}
-
-// Approve only cards that belong to this flow; report the rest.
-async function pumpMuse(page, ctx) {
-  for (const spec of [L.muse.reviewBadge, L.muse.reviewButton]) {
-    const b = (await page.find({ text: spec, limit: 1, exclude: '[data-mcs-done]' }))[0];
-    if (b && !ctx.opened.has(b.id)) { ctx.opened.add(b.id); await page.click(b.id, { settle: 700 }); }
-  }
-  const cards = await page.cards({ text: L.muse.allowAny, css: 'button,[role=button]' });
-  for (const card of cards) {
-    const ours = /api\.openai\.com/i.test(card.text);
-    if (!ours) {
-      if (!ctx.foreign.has(card.text)) { ctx.foreign.add(card.text); emit({ event: 'foreign_approval_left_for_user', text: card.text }); }
-      continue;
-    }
-    const caret = (await page.find({ within: card.card, text: L.muse.moreAllow }))[0];
-    let how = null;
-    if (caret) {
-      await page.click(caret.id, { settle: 400 });
-      const item = (await page.find({ text: L.muse.alwaysAllowSite, css: '[role=menuitem],[role=option],button,li,[role=menuitemradio]' }))[0];
-      if (item) { await page.click(item.id); how = item.text; }
-    }
-    if (!how) {
-      const always = (await page.find({ within: card.card, text: L.muse.alwaysAllow }))[0];
-      if (always) { await page.click(always.id); how = always.text; }
-    }
-    if (!how) {
-      const once = (await page.find({ within: card.card, text: L.muse.allowOnce }))[0] || card.button;
-      await page.click(once.id); how = `${once.text} (one-shot: polling may stall again)`;
-    }
-    ctx.approved.push(how);
-    emit({ event: 'approved', site: 'muse', target: 'api.openai.com', how });
-    await sleep(800);
-  }
-}
-
-async function museTab(c) {
-  const url = c.out.muse_chat_url;
-  const page = await c.browser.pageFor(url, url);
-  await checkBlockers(page, 'muse');
-  return page;
-}
-
-async function stepMuseWait(c) {
-  const page = await museTab(c);
-  const ctx = { opened: new Set(), foreign: new Set(), approved: [] };
-  const end = Date.now() + T(Number(c.opts['install-timeout'] || 600) * 1000);
-  let followed = false;
-  let pendingSeenAt = 0;
-  let baseline = 0;
-  while (Date.now() < end) {
-    await pumpMuse(page, ctx);
-    const lines = (await page.grep({ re: VERDICT_RE })).slice(baseline);
-    const last = lines.length ? new RegExp(VERDICT_RE, 'i').exec(lines[lines.length - 1])[1].toUpperCase() : null;
-    if (last === 'OK') {
-      const deleted = c.opts['keep-key'] ? false : shred(c.state.key_file);
-      return { control_plane: 'OK', approvals: ctx.approved, local_key_file_deleted: deleted };
-    }
-    if (last && last !== 'PENDING') {
-      throw new StepError(`install reported ${last}`, {
-        expected: 'control-plane OK',
-        found: lines.slice(-3),
-        hint: last.startsWith('KEY') ? 'create a new key (state reset key --rename), then send Muse: KEY_FILE=<attached file> CONSUME_KEY_FILE=1 bash ~/muse-chatgpt/restore.sh' : 'ask Muse for the last 20 lines of ~/muse-chatgpt/logs/tunnel.log (journalctl -u muse-chatgpt-tunnel when systemd)',
-      });
-    }
-    if (last === 'PENDING') {
-      if (!pendingSeenAt) pendingSeenAt = Date.now();
-      // give the approval a moment, then ask once for a restore run
-      if (!followed && Date.now() - pendingSeenAt > T(5000)) {
-        const comp = await typeMessage(page, 'muse', MUSE_RESTORE_MESSAGE);
-        await sendMessage(page, 'muse', L.muse.send, comp);
-        followed = true;
-        baseline = (await page.grep({ re: VERDICT_RE })).length;
-        pendingSeenAt = 0;
-      }
-    }
-    await sleep(T(2500));
-  }
-  throw new StepError('timed out waiting for the install report', {
-    expected: 'a Muse reply containing "control-plane  : OK"',
-    found: { verdicts: await page.grep({ re: VERDICT_RE }), approvals: ctx.approved, foreign_cards: [...ctx.foreign] },
-  });
-}
-
 // ---------------------------------------------------------------- chatgpt plugin
 async function pluginListed(page, name) {
-  return (await page.find({ text: [name], css: 'a,button,[role=button],[role=link],li,div,span', limit: 3 })).find((h) => h.score >= 2) || null;
+  const find = async () => {
+    // Prefer a real link/button; clicking an exact-text wrapper div can do nothing.
+    const clickable = (await page.find({ text: [name], css: 'a,button,[role=button],[role=link]', limit: 10 })).find(h => h.score === 4);
+    return clickable || (await page.find({ text: [name], css: 'li,div,span', limit: 10 })).find(h => h.score === 4) || null;
+  };
+  let item = await find();
+  if (item) return item;
+  const tab = (await page.find({ text: L.chatgpt.personal, css: '[role=tab],[role=tablist] button,[role=tablist] a', limit: 5 })).find(h => h.score === 4);
+  if (tab && !(await page.state(tab.id))?.selected) {
+    await page.click(tab.id, { settle: 250 });
+    item = await find();
+  }
+  return item;
 }
 
-async function connectConsent(page, name) {
-  const named = (await page.waitFor(() => page.find({ text: [...L.chatgpt.connect.map((w) => `${w} ${name}`), ...L.chatgpt.connect.map((w) => `${w}${name}`)] }), { timeout: T(8000) })) || [];
-  const btn = named[0] || (await page.find({ scope: 'dialog', text: L.chatgpt.connect, css: 'button,[role=button]' }))[0];
-  if (!btn) return false;
-  await page.click(btn.id, { settle: 1200 });
-  return true;
+async function waitPluginConnection(c, page, name) {
+  const progress = c.state.steps.plugin.connection;
+  const end = progress.started_at_ms + progress.budget_ms;
+  const actions = [...L.chatgpt.connect, ...L.chatgpt.install];
+  const namedActions = actions.flatMap(w => [`${w} ${name}`, `${w}${name}`]);
+  const namedSuccess = [`${name} 现已连接`, `${name}现已连接`, `${name} 已连接`,
+    `${name}已连接`, `${name} is now connected`, `${name} is connected`, `Connected to ${name}`];
+  await page.send('Page.bringToFront');
+  for (;;) {
+    // A list heading such as "Installed" is not proof that this app is connected.
+    const named = (await page.find({ text: namedSuccess, css: 'p,span,div,[role=status],[role=alert]', limit: 20 })).some(h => h.score === 4);
+    const url = await page.url();
+    const detail = url.startsWith(URLS.chatgpt + '/plugins/') &&
+      (await page.find({ text: [name], css: 'h1,h2,h3,[role=heading]' })).some(h => h.score === 4);
+    const connected = detail && (await page.find({ text: L.chatgpt.connected, css: 'p,span,[role=status]' })).some(h => h.score === 4);
+    if (named || connected) return { plugin_url: url.split('?')[0], connected: true };
+
+    const taken = await page.find({ scope: 'dialog', text: L.chatgpt.nameTaken, css: 'p,span,[role=alert]', limit: 1 });
+    if (taken.length) {
+      c.submitted('failed'); // Explicitly rejected: do not rename or silently reuse another app.
+      throw new Refuse(`plugin name "${name}" already exists; inspect it before retrying`, {});
+    }
+    const errors = await page.find({ text: [...L.chatgpt.rateLimited, ...L.chatgpt.connectionFailed],
+      css: '[role=alert],[role=dialog] p,[role=dialog] span', limit: 3 });
+    if (errors.length) throw new StepError('Plugin creation/connection reported an error', {
+      found: errors, hint: 'Inspect the current page and service-provided retry guidance. Do not create another plugin.',
+    });
+    if (Date.now() >= end) throw new StepError('Plugin creation/connection did not finish within 90 seconds', {
+      expected: `creation completes, then Connect ${name}, then confirmation for this app`,
+      hint: 'The current tab is left open. Inspect it, then resume; no second Create or automatic return to the plugin/API pages.',
+    });
+
+    let button = (await page.find({ text: namedActions, css: 'button,[role=button]', enabled: true })).find(h => h.score === 4);
+    let scope = 'named';
+    if (!button) {
+      const dialogOwner = (await page.find({ scope: 'dialog', text: [name], css: 'h1,h2,h3,span,p,a' })).some(h => h.score === 4);
+      if (dialogOwner || detail) {
+        scope = dialogOwner ? 'dialog' : 'detail';
+        button = (await page.find({ ...(dialogOwner ? { scope: 'dialog' } : {}), text: actions,
+          css: 'button,[role=button]', enabled: true })).find(h => h.score === 4);
+      }
+    }
+    if (button) {
+      const action = scope + ':' + norm(button.text);
+      if (!progress.clicked_actions.includes(action)) {
+        // Persist before dispatch: a slow response or rerender must not cause double submission.
+        progress.clicked_actions.push(action); c.save();
+        await page.click(button.id, { what: `Connect ${name}`, settle: 0 });
+      }
+    }
+    await sleep(Math.min(T(500), Math.max(0, end - Date.now())));
+  }
 }
 
 async function stepPlugin(c) {
-  if (c.out.control_plane !== 'OK') throw new Refuse('tunnel not connected yet: finish muse-wait first (creating the plugin earlier gives a misleading rate-limit error)', {});
+  if (c.out.control_plane !== 'OK') throw new Refuse('tunnel not connected yet: finish host-wait first (creating the plugin earlier gives a misleading rate-limit error)', {});
   const page = await c.open('chatgpt', '/plugins');
-  let name = c.names.plugin;
+  const name = c.names.plugin;
+  await page.send('Page.bringToFront');
   await entry(page, 'chatgpt', { text: L.chatgpt.add }, 'plugins Add button');
   if (await pluginListed(page, name)) throw new Refuse(`a plugin named ${name} already exists but is not recorded`, { record: STEPS[4].manual(c).record });
   await page.click({ text: L.chatgpt.add }, { what: 'Add', settle: 500 });
@@ -858,127 +842,181 @@ async function stepPlugin(c) {
     if (!r) throw new StepError('"No authentication" option not found', { expected: 'Authentication = No authentication', found: await page.snapshot({ scope: 'dialog', text: L.chatgpt.auth }) });
     await page.click(r.id);
   }
-  const und = (await page.find({ scope: 'dialog', text: L.chatgpt.understand }))[0];
+  const und = (await page.find({ scope: 'dialog', text: L.chatgpt.understand, css: 'label,[role=checkbox]' }))[0] ||
+    (await page.find({ scope: 'dialog', text: L.chatgpt.understand }))[0];
   if (und) {
     const box = (await page.find({ within: und.id, css: 'input[type=checkbox],[role=checkbox]', text: [], hidden: true }))[0] || und;
     if (!(await page.state(box.id))?.selected) await page.click(und.id);
     if (!(await page.state(box.id))?.selected) throw new StepError('could not tick "I understand"', { expected: 'checkbox ticked', found: [await page.state(box.id)] });
   }
-  for (let attempt = 0; attempt < 3; attempt++) {
-    c.submitted();
-    await page.click({ scope: 'dialog', text: L.chatgpt.create, css: 'button,[role=button]' }, { what: 'Create', settle: 1500 });
-    const taken = await page.find({ scope: 'dialog', text: L.chatgpt.nameTaken, css: 'p,span,div,[role=alert]', limit: 1 });
-    if (taken.length) {
-      name = `${c.names.plugin} ${attempt + 2}`;
-      c.state.names.plugin = name; c.save();
-      await page.fill({ scope: 'dialog', label: L.chatgpt.name }, name, { what: 'plugin name (retry)' });
-      continue;
-    }
-    const limited = await page.find({ text: L.chatgpt.rateLimited, css: 'p,span,div,[role=alert]', limit: 1 });
-    if (limited.length) throw new StepError('ChatGPT reported a rate limit', { expected: 'plugin created', hint: 'usually the tunnel is not polling: rerun muse-wait / ask Muse to run restore.sh', found: limited });
-    break;
-  }
-  await connectConsent(page, name);
-  await page.goto(`${URLS.chatgpt}/plugins`);
-  const listed = await page.waitFor(() => pluginListed(page, name), { timeout: T(10000) });
-  if (!listed) throw new StepError('plugin not listed after Create', { expected: `"${name}" under installed plugins`, found: await page.snapshot({ text: [name] }) });
-  return { plugin_name: name, ...(await connectedCheck(page, name)) };
-}
-
-async function connectedCheck(page, name) {
-  const item = await pluginListed(page, name);
-  await page.click(item.id, { settle: 900 });
-  const needs = (await page.find({ text: L.chatgpt.connect, css: 'button,[role=button]', exclude: '[role=dialog]' })).filter((b) => b.score >= 3);
-  if (needs.length) {
-    await page.click(needs[0].id, { settle: 800 });
-    await connectConsent(page, name);
-  }
-  const url = (await page.url()).split('?')[0];
-  return { plugin_url: /plugin/.test(url) ? url : null };
+  await submitEnabled(page, L.chatgpt.create, 'Create plugin');
+  c.state.steps.plugin.connection = { target_id: page.targetId, started_at_ms: Date.now(),
+    budget_ms: T(90000), clicked_actions: [] };
+  c.submitted();
+  await page.click({ scope: 'dialog', text: L.chatgpt.create, css: 'button,[role=button]' }, { what: 'Create', settle: 0 });
+  // Stay on the submitted page. Creation may still be discovering tools; the
+  // Connect control is offered only once that work finishes.
+  return { plugin_name: name, ...(await waitPluginConnection(c, page, name)) };
 }
 
 async function recoverPlugin(c) {
+  const name = c.names.plugin;
+  const previous = c.state.steps.plugin.connection;
+  const tab = previous && (await c.browser.pages()).find(p => p.targetId === previous.target_id &&
+    (p.url === URLS.chatgpt + '/plugins' || p.url.startsWith(URLS.chatgpt + '/plugins/') || p.url.startsWith(URLS.chatgpt + '/plugins?')));
+  if (tab) {
+    const page = await c.attach(tab.targetId);
+    return { plugin_name: name, ...(await waitPluginConnection(c, page, name)), recovered: true };
+  }
+  // Only explicit recovery after losing the original tab/legacy state visits
+  // the list. It may connect the existing object, never submit Create again.
   const page = await c.open('chatgpt', '/plugins');
+  await page.send('Page.bringToFront');
   await entry(page, 'chatgpt', { text: L.chatgpt.add }, 'plugins page');
-  const name = c.state.names.plugin;
-  if (!(await page.waitFor(() => pluginListed(page, name), { timeout: T(6000) }))) return null;
-  return { plugin_name: name, ...(await connectedCheck(page, name)), recovered: true };
+  const item = await page.waitFor(() => pluginListed(page, name), { timeout: T(6000) });
+  if (!item) return null;
+  await page.click(item.id, { settle: 0 });
+  c.state.steps.plugin.connection = { target_id: page.targetId, started_at_ms: Date.now(),
+    budget_ms: T(90000), clicked_actions: [] };
+  c.save();
+  return { plugin_name: name, ...(await waitPluginConnection(c, page, name)), recovered: true };
 }
 
 // ---------------------------------------------------------------- test
-async function pumpChatGPT(page, plugin, ctx) {
-  const cards = await page.cards({ text: [...L.chatgpt.alwaysAllow, ...L.chatgpt.allow], css: 'button,[role=button]', exclude: 'form' });
-  for (const card of cards) {
-    if (ctx.done.has(card.card)) continue;
-    const ours = card.text.includes(plugin) || /muse_(vm_exec|ping)/.test(card.text);
-    if (!ours) { if (!ctx.foreign.has(card.text)) { ctx.foreign.add(card.text); emit({ event: 'foreign_approval_left_for_user', text: card.text }); } continue; }
-    const btn = (await page.find({ within: card.card, text: L.chatgpt.alwaysAllow }))[0] || (await page.find({ within: card.card, text: L.chatgpt.allow }))[0];
-    if (btn) { await page.click(btn.id); ctx.done.add(card.card); emit({ event: 'approved', site: 'chatgpt', how: btn.text }); }
+async function pumpChatGPT(page, plugin, ctx, request, save) {
+  if (page.targetId !== request.target_id || Date.now() >= request.started_at_ms + request.budget_ms) return;
+  const cards = await page.cards({ text: L.chatgpt.allow, css: 'button,[role=button]',
+    // Localized cards can be forms and need not show a raw tool name.
+    exclude: '[data-message-author-role=user],#prompt-textarea,[contenteditable=true],textarea', ownerText: plugin });
+  for (const card of cards.filter(c => !c.matchesOwner)) {
+    if (!ctx.foreign.has(card.card)) { ctx.foreign.add(card.card); emit({ event: 'foreign_approval_untouched' }); }
   }
-}
-
-async function askTool(page, c, tok, ctx) {
-  const comp = await typeMessage(page, 'chatgpt', testPrompt(c.out.plugin_name, tok));
-  await sendMessage(page, 'chatgpt', L.chatgpt.send, comp);
-  const re = `"echo_token"\\s*:\\s*"${tok}"`;
-  const end = Date.now() + T(150000);
-  while (Date.now() < end) {
-    await pumpChatGPT(page, c.out.plugin_name, ctx);
-    const got = await page.eval((a) => {
-      const msgs = [...document.querySelectorAll(a.sel)];
-      const pool = msgs.length ? [msgs[msgs.length - 1]] : [document.body];
-      for (const m of pool) {
-        const t = m.innerText || '';
-        const hit = t.match(/\{[^{}]*"echo_token"[^{}]*\}/g) || [];
-        for (const j of hit) if (new RegExp(a.re).test(j)) { try { return JSON.parse(j); } catch { return { raw: j.slice(0, 300) }; } }
-      }
-      return null;
-    }, { sel: S.chatgptAssistant, re });
-    if (got && got.utc) return got;
-    await sleep(T(2000));
-  }
-  throw new StepError('no tool result with the token', {
-    expected: `an assistant reply with JSON containing "echo_token": "${tok}"`,
-    found: { assistant: await page.grep({ scope: S.chatgptAssistant, re: 'muse|tool|echo|error|plugin|插件|工具' }), foreign_cards: [...ctx.foreign] },
-    hint: `if the model did not use the plugin, enable "${c.out.plugin_name}" in the composer (+ menu) and rerun --from-step test`,
+  const ours = cards.filter(c => c.matchesOwner);
+  if (ours.length > 1) throw new StepError('Multiple approval cards match this app; nothing approved', {
+    hint: 'Inspect the saved task/card ownership. Do not approve another app, open details as a routine step or send a new task.',
   });
+  const dispatched = request.approval_dispatch_intent_at_ms || request.approval_dispatched_at_ms;
+  if (dispatched) {
+    const active = ours.length && (await page.find({within:ours[0].card,text:L.chatgpt.allow,css:'button,[role=button]',enabled:true})).length;
+    if (!active && !request.approval_confirmed_at_ms) {
+      request.approval_confirmed_at_ms = Date.now(); request.approval_confirmation = 'ui_transition'; save();
+      emit({event:'approved',site:'chatgpt',owner_verified:true,details_opened:false,ui_acknowledged:true});
+    } else if (active && (request.approval_confirmed_at_ms || Date.now()-dispatched >= T(5000))) {
+      throw new StepError('approval_not_confirmed: this app still has an active Allow once control; no second approval sent', {
+        next_action:'SAME_AI_RECOVERY', found:{target_id:page.targetId,active_app_cards:ours.length},
+        hint:'Keep the original task and inspect this card only. Do not open details, resend the task, wait in sleep loops or claim that dispatch meant approval. Resume only after a diagnosed repair.',
+      });
+    }
+    return;
+  }
+  if (!ours.length) return;
+  const card = ours[0];
+  if (!request.approval_seen_at_ms) { request.approval_seen_at_ms = Date.now(); save(); }
+  const btn = (await page.find({ within: card.card, text: L.chatgpt.allow, css: 'button,[role=button]', enabled: true }))[0];
+  if (!btn) return;
+  // The owner authorized this app's one acceptance call. Do not open View details
+  // or require parsing a UI argument envelope; host evidence decides acceptance.
+  await page.click(btn.id, { settle: 0, beforeDispatch: () => {
+    request.approval_dispatch_intent_at_ms = Date.now(); save();
+  } });
+  request.approval_dispatched_at_ms = Date.now(); save(); ctx.done.add(card.card);
+  emit({ event: 'approval_dispatched', site: 'chatgpt', how: btn.text, owner_verified: true, details_opened: false });
 }
 
 async function stepTest(c) {
-  const page = await c.open('chatgpt', '/');
-  await composer(page, 'chatgpt');
+  let request = c.state.steps.test?.request;
+  const check = (timeout = 10000) => hostRequest(c.state, { ...c.opts, _hostTimeoutMs: timeout }, 'verify', { ...c.out, ...request });
+  const verifyIdentity = r => {
+    if (r.host_id !== c.out.host_id || r.hostname !== c.out.hostname) throw new Error('Acceptance reached the wrong host');
+    return r;
+  };
+  // Resume without a new chat/tool call if the previous task already executed.
+  if (request && !c.opts['retry-test']) {
+    const r = verifyIdentity(check());
+    if (r.verified) return { ...r, command_hash: request.command_hash, reused_evidence: true };
+  }
+  let page;
+  if (!request || c.opts['retry-test']) {
+    page = await c.open('chatgpt', '/');
+    await composer(page, 'chatgpt');
+    const token = 'hcs-' + crypto.randomBytes(8).toString('hex');
+    const command = acceptanceCommand(c.out, token);
+    request = { token, command_hash: crypto.createHash('sha256').update(command).digest('hex'),
+      started_at_ms: Date.now(), budget_ms: T(90000), target_id: page.targetId, chat_url: await page.url() };
+    c.state.steps.test.request = request;
+    c.save(); // Persist BEFORE sending; a timeout is not permission to submit twice.
+    const comp = await typeMessage(page, 'chatgpt', testPrompt(c.out.plugin_name, command));
+    await sendMessage(page, 'chatgpt', L.chatgpt.send, comp);
+    request.chat_url = await page.url();
+    c.save();
+  } else {
+    if (Date.now() >= request.started_at_ms + request.budget_ms) {
+      throw new StepError('acceptance budget expired; no task resubmitted', { hint: 'Inspect the existing ChatGPT approval/result and host logs. --retry-test is only for an explicitly needed new attempt.' });
+    }
+    const tabs = (await c.browser.pages()).filter(p => siteUrl(p.url, URLS.chatgpt) &&
+      (request.target_id ? p.targetId === request.target_id : p.url === request.chat_url));
+    if (tabs.length !== 1) throw new StepError('Original acceptance tab is missing or ambiguous; no new task sent', {
+      hint: 'Inspect the saved task and host evidence; do not select an arbitrary ChatGPT tab.',
+    });
+    page = await c.attach(tabs[0].targetId);
+    await page.ensureRendering({timeout:T(2000)});
+  }
+  const command = acceptanceCommand(c.out, request.token);
+  if (crypto.createHash('sha256').update(command).digest('hex') !== request.command_hash) {
+    throw new StepError('Saved acceptance command no longer matches target configuration; nothing approved', {});
+  }
   const ctx = { done: new Set(), foreign: new Set() };
-  const t1 = 'mcs-' + crypto.randomBytes(4).toString('hex');
-  const r1 = await askTool(page, c, t1, ctx);
-  await sleep(1100);
-  const t2 = 'mcs-' + crypto.randomBytes(4).toString('hex');
-  const r2 = await askTool(page, c, t2, ctx);
-  if (r1.utc === r2.utc) throw new StepError('both calls returned the same utc', { expected: 'two different timestamps', found: [r1, r2] });
-  return { token1: t1, utc1: r1.utc, token2: t2, utc2: r2.utc, hostname: r1.hostname, chat_url: (await page.url()).split('?')[0] };
-}
-
-async function stepLogs(c) {
-  const page = await museTab(c);
-  const FWD = 'dispatcher forwarded command to MCP server';
-  const base = (await page.grep({ re: FWD })).length;
-  const comp = await typeMessage(page, 'muse', MUSE_LOGS_MESSAGE);
-  await sendMessage(page, 'muse', L.muse.send, comp);
-  const ctx = { opened: new Set(), foreign: new Set(), approved: [] };
-  const lines = await page.waitFor(async () => { await pumpMuse(page, ctx); const l = await page.grep({ re: FWD }); return l.length > base ? l.slice(base) : null; }, { timeout: T(180000), interval: T(2500) });
-  if (!lines) throw new StepError('Muse did not return forwarded-command log lines', { expected: `"${FWD}" lines`, found: await page.grep({ re: 'dispatcher|tools/call|No such file|找不到' }) });
-  const mcp = await page.grep({ re: 'rpc method=tools/call' });
-  const withId = lines.filter((l) => l.includes(c.out.tunnel_id));
-  return { forwarded: lines.length, forwarded_with_tunnel_id: withId.length, mcp_calls: mcp.length, sample: lines.slice(-2) };
+  const end = request.started_at_ms + request.budget_ms;
+  let last;
+  while (Date.now() < end) {
+    // Host proof takes precedence over delayed UI acknowledgment; never click again
+    // after the one authorized command has already executed.
+    last = verifyIdentity(check(Math.max(1, end - Date.now())));
+    if (last.verified) {
+      if ((request.approval_dispatch_intent_at_ms || request.approval_dispatched_at_ms) && !request.approval_confirmed_at_ms) {
+        request.approval_confirmed_at_ms = Date.now(); request.approval_confirmation = 'host_evidence'; c.save();
+        emit({event:'approved',site:'chatgpt',owner_verified:true,details_opened:false,host_verified:true});
+      }
+      return { ...last, command_hash: request.command_hash, chat_url: await page.url() };
+    }
+    await pumpChatGPT(page, c.out.plugin_name, ctx, request, c.save);
+    await sleep(Math.min(T(1500), Math.max(0, end - Date.now())));
+  }
+  throw new StepError('single acceptance task did not complete within 90 seconds', {
+    expected: 'matching host execution log plus written/read marker',
+    found: { shell_ok: last?.shell_ok, file_ok: last?.file_ok, approvals: ctx.done.size, foreign_cards: [...ctx.foreign] },
+    hint: 'Check approval, app selection or tool error. Do not repeat passed checks or wait another ten minutes.',
+  });
 }
 
 // ---------------------------------------------------------------- runner
+// The CLI stops unsafe automatic actions, not the owning AI's setup task.
+function technicalRecovery(err) {
+  let inspect = 'Inspect the reported control/error on the saved tab and the same installation; repair only the identified cause.';
+  if (/^page_load_failed:/.test(err.message)) inspect = 'Reinspect the saved page and required controls now. A subresource 403 alone does not prove login failure. If the page has become usable, resume the same state; otherwise diagnose that resource/session/network failure, without bypassing access checks or repeated reloads.';
+  else if (/^page_render_stalled:|^page_window_mismatch:/.test(err.message)) inspect = 'Inspect the saved window/tab rendering and focus. Use authorized browser controls on that selected profile; preserve submitted forms/tasks. Do not rewrite CSS, change profiles or restart the browser without authorization.';
+  else if (/^approval_not_confirmed:/.test(err.message)) inspect = 'Check host execution evidence first, then the original task and unique app card. Resolve the diagnosed focus/overlay/UI problem only. Do not open details or blindly repeat an uncertain approval, and do not send a new task.';
+  else if (/^cdp_timeout:/.test(err.message)) inspect = 'Reconnect read-only to the selected endpoint and check whether the timed-out action already took effect before deciding any recovery action. Never replay an uncertain write/click.';
+  return {
+    next_action:'SAME_AI_RECOVERY',
+    recovery:{owner:'current_ai',script_stopped:true,
+      do:[inspect,'Verify the repair, then continue the original workflow with its saved state, owned objects and original acceptance task. Do not ask the user to do ordinary setup clicks.'],
+      rule:'Each diagnostic/action is bounded. Continue while evidence identifies a safe new action; change approach after repeated failure, not unchanged retries or fixed-sleep loops. Missing authorization/login/MFA/admin permission or an evidenced external blocker requires an honest prerequisite report, never bypass or fabricated success.',
+    },
+  };
+}
 function failure(step, err, c, page) {
   const s = c.state.steps[step.name] || {};
   const base = { ok: false, step: step.name, attempts: s.attempts || 1, error: err.message };
-  if (err instanceof NeedsUser) return { ...base, needs_user: err.kind, info: err.info, message: `Ask the user to complete ${err.kind} in the CDP browser, then rerun: ${CMD} run` };
+  if (err instanceof NeedsUser && err.kind === 'agent_host_setup') return { ...base, needs_agent: true, takeover: step.manual(c), resume: `${CMD} run --state "${STATE_FILE}"` };
+  if (err instanceof NeedsUser) return { ...base, next_action:'NEEDS_USER', needs_user: err.kind, info: err.info, message: `Ask the user to complete ${err.kind} in the CDP browser, then rerun: ${CMD} run` };
+  if (err.info?.next_action === 'SAME_AI_RECOVERY') return {
+    ...base, ...technicalRecovery(err), expected:err.info.expected, found:err.info.found,
+    hint:err.info.hint, page:page || undefined, submitted:['submitted','awaiting_user'].includes(s.status) || undefined,
+  };
   const m = step.manual(c);
   return {
-    ...base,
+    ...base, ...technicalRecovery(err),
     ...(err instanceof Refuse ? { refused: true } : {}),
     expected: err.info?.expected,
     problems: err.info?.problems,
@@ -991,7 +1029,8 @@ function failure(step, err, c, page) {
       verify: m.verify,
       record: err.info?.record || m.record,
       resume: `${CMD} run`,
-      rule: 'same step failing twice for the agent too -> stop and tell the user where it is stuck',
+      owner:'current_ai',
+      rule: 'The same AI diagnoses and repairs within authorization, then resumes. Repeated failure requires a new evidence-based approach, not giving up or unchanged retries. Preserve original state/tab/task, acceptance deadline and evidence; report actual fallbacks and elapsed time.',
     },
   };
 }
@@ -1008,29 +1047,80 @@ function validateOutputs(step, outputs) {
 
 async function run() {
   const state = loadState();
-  saveState(state);
+  bindTarget(state, opts);
+  if (!['agent', 'script'].includes(opts['host-mode'] || 'script')) throw new Error('--host-mode must be agent or script');
   const dry = !!opts['dry-run'];
+  if (!dry && (opts['host-mode'] || 'script') === 'script' && !opts['allow-control'] && state.steps['host-install']?.status !== 'done') {
+    throw new Error('Authorized end-to-end setup requires --allow-control before creating any objects');
+  }
+  if (state.browser && state.browser.endpoint !== CDP) throw new Error('State is bound to another browser endpoint; use the original --cdp');
+  if (!dry) {
+    state.browser ||= { endpoint: CDP, tabs: {} };
+    state.workflow_started_at ||= new Date().toISOString();
+  }
+  saveState(state);
   const browser = await browserConnect();
   const opened = [];
-  const museTabs = [];
   const c = {
     browser, state, opts: { mode: opts.mode || 'auto', ...opts }, names: state.names,
     get out() { return outputsOf(state); },
     save: () => saveState(state),
-    // Muse tabs stay open: later steps continue in the same chat.
-    async open(site, p) { const pg = await browser.newPage(URLS[site] + p); if (site !== 'muse') opened.push(pg); else museTabs.push(pg); return pg; },
+    async open(site, p) {
+      const url = URLS[site] + p;
+      const saved = !dry && state.browser.tabs[site];
+      const tabs = await browser.pages();
+      const tab = saved && tabs.find(t => t.targetId === saved.target_id);
+      const sibling = !dry && Object.values(state.browser.tabs).find(s => s.target_id !== saved?.target_id && tabs.some(t=>t.targetId===s.target_id && siteUrl(t.url,s.base)));
+      if (tab && (saved.base !== URLS[site] || !siteUrl(tab.url, URLS[site]))) {
+        throw new StepError('Bound tab moved to another site; no navigation or click sent', { found: { target_id: tab.targetId } });
+      }
+      // Start with new owned tabs, not repeated newWindow calls: some Chromium
+      // builds freeze rendering when several headless windows are created.
+      let pg = tab ? await browser.attach(tab.targetId) : await browser.newPage(null, {inWindowOf:sibling?.target_id});
+      const bind = () => {
+        opened.push(pg);
+        if (!dry) { state.browser.tabs[site] = {target_id:pg.targetId,base:URLS[site]}; saveState(state); }
+      };
+      bind();
+      await pg.send('Page.bringToFront');
+      if (await pg.url() !== url) await pg.goto(url);
+      try { await pg.ensureRendering({timeout:T(2000)}); }
+      catch (err) {
+        // Exactly one window fallback, only for a brand-new, unsubmitted entry
+        // tab. Never transplant a saved form/chat or reset its submission state.
+        if (tab || dry || state.browser.window_recovery_at || !err.message.startsWith('page_render_stalled:')) throw err;
+        const view = await pageLoadState(pg);
+        if (view.dialogs || view.resources.some(r=>[401,403].includes(r.status))) throw err;
+        state.browser.window_recovery_at = new Date().toISOString(); saveState(state);
+        emit({event:'page_window_recovery',site,attempt:1,reason:'new_entry_tab_render_stalled'});
+        const original = pg;
+        pg = await browser.newPage(null, {newWindow:true}); bind();
+        await browser.send('Target.detachFromTarget',{sessionId:original.sid});
+        opened.splice(opened.indexOf(original),1);
+        await original.close(); // Our new entry tab only; never a user's existing tab.
+        await pg.goto(url);
+        await pg.ensureRendering({timeout:T(2000)});
+      }
+      return pg;
+    },
+    async attach(targetId) {
+      const pg = await browser.attach(targetId); opened.push(pg);
+      if (!dry && siteUrl(await pg.url(), URLS.chatgpt)) {
+        state.browser.tabs.chatgpt = { target_id: targetId, base: URLS.chatgpt }; saveState(state);
+      }
+      return pg;
+    },
   };
   if (!['auto', 'manual'].includes(c.opts.mode)) throw new Error('--mode must be auto or manual');
 
   if (dry) {
     const report = [];
-    for (const [site, p, step] of [['platform', '/settings/organization/tunnels', 'tunnel'], ['platform', '/settings/organization/api-keys', 'key'], ['muse', '/', 'muse-install'], ['chatgpt', '/plugins', 'plugin'], ['chatgpt', '/', 'test']]) {
+    for (const [site, p, step] of [['platform', '/settings/organization/tunnels', 'tunnel'], ['platform', '/settings/organization/api-keys', 'key'], ['chatgpt', '/plugins', 'plugin'], ['chatgpt', '/', 'test']]) {
       const pg = await c.open(site, p);
       let res;
       try { res = await STEPS.find((s) => s.name === step).locate(c, pg); } catch (e) { res = [{ what: step, found: false, error: e instanceof NeedsUser ? `needs ${e.kind}` : e.message }]; }
       for (const r of res) report.push({ step, ...r });
       await pg.close();
-      museTabs.length = 0;
     }
     const missing = report.filter((r) => !r.found);
     emit({ ok: missing.length === 0, dry_run: true, located: report });
@@ -1055,11 +1145,13 @@ async function run() {
     if (prev?.status === 'done') {
       if (!(from === step.name && !step.creates)) { emit({ event: 'skip', step: step.name, reason: 'done' }); continue; }
     }
-    state.steps[step.name] = { ...(prev || {}), status: prev?.status === 'done' ? 'running' : (prev?.status || 'running'), attempts: (prev?.attempts || 0) + 1, started_at: new Date().toISOString() };
+    state.steps[step.name] = { ...(prev || {}), status: prev?.status === 'done' ? 'running' : (prev?.status || 'running'), attempts: (prev?.attempts || 0) + 1,
+      first_started_at:prev?.first_started_at || prev?.started_at || new Date().toISOString(), started_at: new Date().toISOString() };
     c.submitted = (status = 'submitted') => { state.steps[step.name].status = status; saveState(state); };
     saveState(state);
     emit({ event: 'step', step: step.name });
     let pageInfo = null;
+    const stepStarted = Date.now();
     try {
       let outputs = null;
       if (['submitted', 'awaiting_user'].includes(prev?.status)) {
@@ -1072,28 +1164,42 @@ async function run() {
       }
       const bad = validateOutputs(step, outputs);
       if (bad.length) throw new StepError(`step produced invalid outputs: ${bad.join(', ')}`, { expected: Object.keys(step.required).join(', '), found: outputs });
-      state.steps[step.name] = { status: 'done', by: 'script', at: new Date().toISOString(), attempts: state.steps[step.name].attempts, outputs };
+      const current = state.steps[step.name];
+      const wallStart = current.request?.started_at_ms || current.connection?.started_at_ms || Date.parse(current.first_started_at);
+      state.steps[step.name] = { ...current, status: 'done', by: 'script', at: new Date().toISOString(),
+        attempts: current.attempts, elapsed_ms: Date.now() - stepStarted,
+        wall_elapsed_ms: Date.now() - wallStart, outputs };
+      delete state.steps[step.name].last_error;
       saveState(state);
       emit({ event: 'done', step: step.name, outputs });
-      for (const pg of opened.splice(0)) await pg.close();
+      // Keep the two run-owned tabs: Platform tunnel -> key, ChatGPT plugin -> acceptance.
+      // Releasing CDP sessions does not close or navigate those pages.
+      for (const pg of opened.splice(0)) await browser.send('Target.detachFromTarget', { sessionId: pg.sid });
     } catch (err) {
       const cur = state.steps[step.name];
       if (!['submitted', 'awaiting_user'].includes(cur.status)) cur.status = 'failed';
       cur.last_error = err.message;
+      cur.elapsed_ms = Date.now() - stepStarted;
       saveState(state);
-      const last = opened[opened.length - 1] || museTabs[museTabs.length - 1];
-      try { if (last) pageInfo = { url: (await last.url()).split('?')[0], left_open: true }; } catch { /* ignore */ }
+      const last = opened[opened.length - 1];
+      try { if (last) pageInfo = { target_id: last.targetId, url: (await last.url()).split('?')[0], left_open: true }; } catch { /* ignore */ }
       if (!(err instanceof StepError || err instanceof NeedsUser || err instanceof Refuse)) err.info = { expected: 'no internal error', found: String(err.stack || err).split('\n').slice(0, 4) };
       emit(failure(step, err, c, pageInfo));
       browser.close();
-      return err instanceof NeedsUser ? 11 : err instanceof Refuse ? 12 : 10;
+      return err instanceof NeedsUser ? (err.kind === 'agent_host_setup' ? 13 : 11) : err instanceof Refuse ? 12 : 10;
     }
   }
   const out = outputsOf(state);
   emit({ ok: true, summary: {
     tunnel: `${out.tunnel_name} (${out.tunnel_id})`, workspace: out.workspace, key: out.key_name, plugin: out.plugin_name,
-    test: out.token1 ? `${out.token1} @ ${out.utc1}, ${out.token2} @ ${out.utc2}, host ${out.hostname}` : undefined,
-    logs: out.forwarded !== undefined ? `${out.forwarded} forwarded lines (${out.forwarded_with_tunnel_id} with tunnel id), ${out.mcp_calls} MCP calls` : undefined,
+    test: out.verified ? `single-task acceptance verified on ${out.hostname}` : undefined,
+    workflow_wall_ms: Date.now()-Date.parse(state.workflow_started_at),
+    timing_scope:'First real run to this result, including recovery; AI preparation before the first run is separate.',
+    timings_ms: Object.fromEntries(Object.entries(state.steps).map(([k,v]) => [k, v.elapsed_ms ?? null])),
+    wall_timings_ms: Object.fromEntries(Object.entries(state.steps).map(([k,v]) => [k, v.wall_elapsed_ms ?? null])),
+    complete: STEPS.every(s => state.steps[s.name]?.status === 'done'),
+    next_action: STEPS.every(s => state.steps[s.name]?.status === 'done') ? 'REPORT_AND_STOP' : 'RESUME_INCOMPLETE_STEP',
+    stop_instruction: 'Verified file + successful command hash are final evidence. Report recorded timings and fallbacks. Do not reread ChatGPT prose, revisit plugin/API pages or repeat health/log/tool checks. At most one read-only comparison of the pre-recorded old connections remains.',
   } });
   browser.shutdown();
   return 0;
@@ -1144,11 +1250,30 @@ function stateCmd() {
 }
 
 // ---------------------------------------------------------------- fallback tools
+function siteUrl(url, base) {
+  return url === base || url.startsWith(base + '/') || url.startsWith(base + '?') || url.startsWith(base + '#');
+}
+
 async function tabFor(browser) {
-  const prefix = opts.tab || '';
-  const t = (await browser.pages()).filter((p) => p.url.startsWith(prefix) || p.url.includes(prefix));
-  if (!t.length) throw new StepError(`no open tab matches ${prefix}`, { found: (await browser.pages()).map((p) => p.url.split('?')[0]) });
-  return browser.attach(t[t.length - 1].targetId);
+  const pages = await browser.pages();
+  const selector = opts['tab-id'] || opts.tab;
+  if (!selector || selector === true) throw new StepError('Specify --tab-id or an unambiguous --tab URL; no tab selected', {});
+  const state = loadState();
+  if (state.browser && state.browser.endpoint !== CDP) throw new StepError('Use the state-bound --cdp endpoint', {});
+  let matches;
+  if (opts['tab-id']) matches = pages.filter(p => p.targetId === selector);
+  else {
+    // Prefer an exact URL; broad URL prefixes must not silently choose the last tab.
+    matches = pages.filter(p => p.url === selector);
+    if (!matches.length) matches = pages.filter(p => siteUrl(p.url, String(selector).replace(/\/+$/, '')));
+  }
+  if (matches.length !== 1) throw new StepError('Tab selector is missing or ambiguous; no action sent', {
+    found: matches.map(p => ({ target_id: p.targetId, url: p.url.split('?')[0] })),
+    expected: 'one exact --tab-id from the failure page or browser target list',
+  });
+  const page = await browser.attach(matches[0].targetId);
+  if (!['snapshot', 'grep'].includes(cmd)) await page.send('Page.bringToFront');
+  return page;
 }
 
 async function toolCmd() {
@@ -1161,7 +1286,7 @@ async function toolCmd() {
     else if (cmd === 'click') res = await page.click({ scope, text: split(opts.text), css: opts.css }, { what: opts.text });
     else if (cmd === 'fill') res = await page.fill({ scope, label: split(opts.label) }, String(opts.value ?? ''), { what: opts.label });
     else if (cmd === 'select') res = await page.select({ scope, label: split(opts.label) }, split(opts.option), { what: opts.label });
-    else if (cmd === 'attach') { if (opts['cdp-files']) await page.setFiles([path.resolve(opts.file)], { buttonSpec: opts.button ? { text: split(opts.button) } : { text: L.muse.attach } }); else await page.nativeFiles(path.resolve(opts.file)); res = 'attached'; }
+    else if (cmd === 'attach') { if (opts['cdp-files'] || process.platform !== 'darwin') await page.setFiles([path.resolve(opts.file)], { buttonSpec: opts.button ? { text: split(opts.button) } : { text: ['Attach', 'Upload', '添加附件'] } }); else await page.nativeFiles(path.resolve(opts.file)); res = 'attached'; }
     else if (cmd === 'grep') res = await page.grep({ scope, re: opts.re });
     else if (cmd === 'press') { await page.press(opts.key || 'Escape', Number(opts.times || 1)); res = 'pressed'; }
     else if (cmd === 'key-from-page') {
@@ -1175,7 +1300,7 @@ async function toolCmd() {
     emit({ ok: true, result: res });
     return 0;
   } catch (e) {
-    emit({ ok: false, error: e.message, expected: e.info?.expected, found: e.info?.found });
+    emit({ ok: false, error: e.message, expected: e.info?.expected, found: e.info?.found, ...technicalRecovery(e) });
     return 10;
   } finally { browser.close(); }
 }
@@ -1183,7 +1308,7 @@ async function toolCmd() {
 function keyFromClipboard() {
   const state = loadState();
   let v;
-  try { v = clip.read(); } catch { emit({ ok: false, error: 'pbpaste not available (macOS only)' }); return 1; }
+  try { v = clip.read(); } catch (e) { emit({ ok: false, error: e.message }); return 1; }
   if (!new RegExp(KEY_RE).test(v)) { emit({ ok: false, error: 'clipboard does not hold an sk-... key (nothing written)' }); return 10; }
   const fp = writeKeyFile(state.key_file, v);
   clip.clear();
@@ -1195,41 +1320,57 @@ function keyFromClipboard() {
 
 function usage() {
   process.stdout.write(`usage:
-  ${CMD} run [--mode auto|manual] [--cdp URL] [--workspace NAME] [--project NAME]
-             [--from-step STEP] [--only STEP] [--dry-run] [--keep-key] [--no-relay] [--state FILE] [--labels FILE] [--ref TAG]
+  ${CMD} browser-discover [--browser-user-data-dir PATH]  # read-only, no guessed ports
+  ${CMD} run [--mode auto|manual] [--cdp URL | --browser-user-data-dir PATH] [--workspace NAME] [--project NAME]
+             --target local|SSH_ALIAS --host-name NAME [--target-os posix|windows] [--host-mode agent|script] [--allow-control] [--control-plane-proxy auto|direct|URL]
+             [--from-step STEP] [--only STEP] [--dry-run] [--no-relay] [--state FILE] [--labels FILE] [--retry-test]
   ${CMD} state show | done <step> k=v ... | set names.plugin="..." | reset <step> [--rename]
-  ${CMD} message install|restore|keepalive|logs print the Muse message text
+  ${CMD} host install|status|logs|preflight --target local|SSH_ALIAS --host-name NAME [--allow-control] [--enable-linger]
   ${CMD} key-from-clipboard | key-from-page --tab URL
   ${CMD} relay stop          end the shared Chrome connection (otherwise: after a full run, or 10 idle minutes)
-  ${CMD} snapshot|click|fill|select|attach|grep|press --tab URL-PREFIX [--scope dialog]
+  ${CMD} snapshot|click|fill|select|attach|grep|press (--tab-id TARGET_ID | --tab UNIQUE_URL) [--scope dialog]
         [--text "A|B"] [--label "A|B"] [--value V] [--option "A|B"] [--file F] [--re REGEX] [--key Escape]
 steps: ${STEP_NAMES.join(' -> ')}
-default CDP endpoint: ${CDP}   state file: ${STATE_FILE}
+default host-mode: script (one AI, end-to-end); --allow-control required for installation
+ default CDP endpoint: ${CDP}   state file: ${STATE_FILE}
 `);
   return cmd ? 1 : 0;
 }
 
 async function main() {
   try {
+    if (cmd === 'browser-discover') {
+      const candidates = await discoverEndpoints({profile:opts['browser-user-data-dir']});
+      emit({ok:candidates.length===1,candidates:candidates.map(({endpoint,profile})=>({endpoint,profile})),
+        hint:'Select the owner-chosen browser only. No launch, restart, profile creation or port scan was performed.'});
+      return candidates.length===1 ? 0 : 10;
+    }
+    if (['run','snapshot','click','fill','select','attach','grep','press','key-from-page','relay'].includes(cmd)) await chooseBrowser();
     if (cmd === 'run') return await run();
     if (cmd === 'state') return stateCmd();
     if (cmd === 'key-from-clipboard') return keyFromClipboard();
     if (cmd === 'relay' && pos[0] === 'stop') {
-      if (!fs.existsSync(RELAY_SOCK)) { emit({ ok: true, relay: 'not running' }); return 0; }
+      if (process.platform === 'win32' || !fs.existsSync(relaySocket())) { emit({ ok: true, relay: 'not running' }); return 0; }
       (await browserConnect()).shutdown();
       emit({ ok: true, relay: 'stopped' });
       return 0;
     }
-    if (cmd === 'message') {
-      const st = loadState(); const o = outputsOf(st);
-      const m = pos[0] === 'logs' ? MUSE_LOGS_MESSAGE : pos[0] === 'restore' ? MUSE_RESTORE_MESSAGE : pos[0] === 'keepalive' ? MUSE_KEEPALIVE_MESSAGE : museInstallMessage({ key_file: st.key_file, tunnel_id: o.tunnel_id || 'TUNNEL_ID' });
-      process.stdout.write(m + '\n');
-      return 0;
+    if (cmd === 'host') {
+      const state = loadState();
+      bindTarget(state, opts);
+      saveState(state);
+      const started = Date.now();
+      const result = hostRequest(state, opts, pos[0] || 'status', { ...outputsOf(state), ...(state.steps.test?.request || {}) });
+      if (pos[0] === 'install') {
+        state.steps['host-install'] = { status: 'done', by: 'host-command', at: new Date().toISOString(), elapsed_ms: Date.now() - started, outputs: result };
+        saveState(state);
+      }
+      emit({ ok: true, result }); return 0;
     }
     if (['snapshot', 'click', 'fill', 'select', 'attach', 'grep', 'press', 'key-from-page'].includes(cmd)) return await toolCmd();
     return usage();
   } catch (e) {
-    emit({ ok: false, error: e.message, expected: e.info?.expected });
+    emit({ ok: false, error: e.message, expected: e.info?.expected, hint:e.info?.hint, ...technicalRecovery(e) });
     return e instanceof StepError ? 10 : 1;
   }
 }

@@ -1,109 +1,84 @@
-# muse-chatgpt-setup
+# chatgpt-host-connect
 
-[中文](README.zh-CN.md)
+**Beta: connect ChatGPT to computers and servers.** macOS and Ubuntu live workflows have passed; native Windows remains experimental.
 
-An agent skill that connects a **signed-in** ChatGPT account to a **signed-in** Muse account over an OpenAI Secure MCP Tunnel. You paste one prompt; the agent drives your browser and finishes the setup, including the test calls.
+[中文说明](README.zh-CN.md) · [Skill](skills/chatgpt-host-connect/SKILL.md) · [MIT](LICENSE)
 
-## What you get
+One AI connects ChatGPT to an **independent macOS, Linux or native Windows installation** through OpenAI Secure MCP Tunnel: create Tunnel/Key, install the host, connect the ChatGPT app and verify one tool call. No Muse, second-agent handoff, old connection, private runtime or author-specific browser helper.
 
-ChatGPT gets a plugin with two tools that really run on your Muse VM:
+## Platform status
 
-| Tool | Returns |
-|---|---|
-| `muse_ping` | `{"pong": true, "utc": ...}` |
-| `muse_vm_exec` | runs one whitelisted command (`status_echo`): hostname, UTC time, and the token you passed |
-
-This is a **link test**: it proves ChatGPT -> tunnel -> Muse VM -> back works. It does **not** let ChatGPT talk to the Muse agent - Muse offers no interface for that, and the skill reports it as `NOT VERIFIED` rather than faking it.
-
-## How it works
-
-1. **Platform** (platform.openai.com): a new tunnel with a unique name, linked to your ChatGPT workspace, and a Restricted API key (Tunnels: Read + Use only, 30 days).
-2. **Muse**: one message with the key attached as a file. Muse downloads `install.sh` + `muse-mcp.py` from this repo's release tag and runs them on its VM: official `tunnel-client` (checksum-verified), a tiny MCP server, a connectivity check. It also registers a Muse hook that restarts the connection by itself after Muse replaces the VM.
-3. **ChatGPT**: a custom MCP plugin over that tunnel (no authentication), connected.
-4. **Proof**: two tool calls with fresh tokens, plus the VM's own log lines showing this tunnel forwarded them.
-
-A script (`scripts/browser/muse-setup.mjs`) does the clicking through Chrome DevTools Protocol, reads back every value it set (permissions, expiry, workspace, selected tunnel), and stops with a precise report when the page does not match - the agent then finishes that step by hand and resumes. A state file makes reruns safe: finished steps are skipped and nothing is created twice. Button labels are matched in English and Chinese.
-
-Target time for a first run: about 5-6 minutes, most of it Muse installing.
-
-## Two key modes
-
-| | Fully automatic (`--mode auto`, default) | Semi-automatic (`--mode manual`) |
+| Target | Runtime / persistence | Verification |
 |---|---|---|
-| Who clicks *Create secret key* | the script | you, then you click **Copy** |
-| How the key reaches the local file | the script reads it from the *Save your key* dialog | the script reads the clipboard, then clears it |
-| Does the agent's browser session read the key on the page | yes (into memory and a `0600` file; never printed) | no |
-| Questions to you | none, except login / CAPTCHA / payment | one click pair on the key dialog |
+| macOS | Bash, Python, official Homebrew client; LaunchAgents after GUI login | Current workflow passed live, including same-AI recovery of an interrupted setup. Not a pristine-machine or reboot test. |
+| Linux x86_64/arm64 + systemd | Bash, Python, verified official release; user units + authorized linger | Current Ubuntu workflow passed live: six steps in one run, one automatic rendering recovery, one verified terminal call. Other distributions/architectures are not live-validated. |
+| Native Windows 10/11 x64/ARM64 | PowerShell, Python, verified official EXE; least-privilege user logon tasks | New backend. Native/live end-to-end **NOT VERIFIED**; not a production-parity claim. |
 
-In both modes the key ends up in a local `0600` file, is attached to the Muse chat as a file, and is never shown in chat text, logs or command lines. Note what that means: the agent process (auto mode) and the Muse VM agent (both modes) could read the key. That is why it is Restricted to Tunnels and expires in 30 days; rotate it with one Muse message (see `references/muse-bootstrap.md`).
+WSL2 is an explicitly selected Linux target, not a substitute for native Windows. macOS/Windows default persistence requires a logged-in, awake user session. Other systems/architectures or restrictive policies stop with prerequisites; no silent elevation or OS substitution.
 
-## Requirements
+The tools provide shell execution, file read/write and directory listing with the service user's permissions. **Not sandboxed.** No trading, publishing or paid inference permission is implied.
 
-- **Your everyday Chrome with remote debugging on**, signed in to platform.openai.com, chatgpt.com and muse.ai. Open `chrome://inspect/#remote-debugging` and switch it on (Chrome 144+). When a run starts, Chrome asks you to **Allow** the connection — click it once per run; the script and any AI fallback share that one connection, which ends when the run finishes (or after 10 idle minutes). The skill finds the endpoint by itself.
-  - Alternative: a separate profile started with `--remote-debugging-port=9333 --user-data-dir="$HOME/.muse-chatgpt-setup/chrome"` (sign in there once), then pass `--cdp http://127.0.0.1:9333`.
-- **Node.js 22+** where the agent runs (no npm packages needed). Semi-automatic mode needs macOS (`pbpaste`).
-- An OpenAI account that may create tunnels and API keys; a Muse VM with `curl` and `python3`.
+## Download / install
 
-## Install the skill
+Download a ZIP from [Releases](https://github.com/elaeuk-wq/chatgpt-host-connect/releases) or clone [the repository](https://github.com/elaeuk-wq/chatgpt-host-connect), then give your AI the full [`skills/chatgpt-host-connect/`](skills/chatgpt-host-connect) directory. Do not copy only `SKILL.md`. It can live anywhere supported by your agent; scripts locate their bundled files relative to themselves.
 
-```bash
-git clone https://github.com/elaeuk-wq/muse-chatgpt-setup-skill
-# Pi
-cp -r muse-chatgpt-setup-skill/skills/muse-chatgpt-setup ~/.agents/skills/
-# Claude Code
-cp -r muse-chatgpt-setup-skill/skills/muse-chatgpt-setup ~/.claude/skills/
-# Codex
-cp -r muse-chatgpt-setup-skill/skills/muse-chatgpt-setup ~/.codex/skills/
-```
+No secrets or state ship in the download. Controller: **Node >=22**, and OpenSSH for remote targets. Target: **Python >=3.9**, prepared by authorized Homebrew/apt/dnf/winget setup when missing. No pip/npm dependencies. The official tunnel client is installed independently of old services. Account access, real administrator approvals, login/MFA and browser-debugging permission remain user prerequisites.
 
-(Codex: if your version reads skills from another directory, use that one.) Restart the agent so it picks the skill up.
+Example request to your AI:
 
-## Prompts to paste
+> Read this skill and independently connect ChatGPT to my selected computer or server (local or an authorized SSH alias), named work-host. Use my selected browser/profile. I authorize necessary dependency installation, a new Tunnel, restricted Key, ChatGPT app and persistent user services (including Linux linger when needed). Preserve existing connections. Complete ordinary setup/approval clicks yourself, stop for real owner prerequisites, and report actual evidence, timing and fallbacks.
 
-**Semi-automatic** - the agent does everything except the key's Create + Copy:
+### Select a browser, not a machine-specific launcher
 
-> Use the muse-chatgpt-setup skill in semi-automatic key mode to connect my ChatGPT and Muse. My Chrome (remote debugging on) is signed in to platform.openai.com, chatgpt.com and muse.ai. You may create a new tunnel, a restricted API key, a ChatGPT plugin, install the connector on my Muse VM, and approve this setup's own approval cards. When the key form is filled, tell me and I will click Create and Copy; do everything else yourself through the final verification, then report PASS/BLOCKED per step.
+Use the owner-selected Chrome/Edge/Chromium profile. `browser-discover --browser-user-data-dir <path>` reads its live debugging metadata; `--cdp <verified-URL>` supports fixed/custom endpoints. No guessed port, port scan, profile creation, browser restart or cookie copying. See [browser connection](skills/chatgpt-host-connect/references/browser-connection.md).
 
-> 用 muse-chatgpt-setup 技能，以半自动 Key 模式把我的 ChatGPT 和 Muse 连起来。我的 Chrome 已打开远程调试，并已登录 platform.openai.com、chatgpt.com 和 muse.ai。你可以新建隧道、受限 API Key、ChatGPT 插件，在我的 Muse VM 上安装连接器，并批准本流程自己的审批卡。Key 表单填好后告诉我，我自己点创建和复制；其余步骤你做完直到最终验收，最后按步骤报告 PASS/BLOCKED。
-
-**Fully automatic** - no questions, stops only for login, CAPTCHA or payment:
-
-> Use the muse-chatgpt-setup skill in fully automatic mode to connect my ChatGPT and Muse. My Chrome (remote debugging on) is signed in to platform.openai.com, chatgpt.com and muse.ai. I authorize you to create a new tunnel, a restricted API key (Tunnels Read + Use, 30 days), and a ChatGPT plugin, to install the connector on my Muse VM, and to approve this setup's own approval cards. Do not ask me anything; stop only if a login, CAPTCHA or payment is needed. Report PASS/BLOCKED per step at the end.
-
-> 用 muse-chatgpt-setup 技能，全自动把我的 ChatGPT 和 Muse 连起来。我的 Chrome 已打开远程调试，并已登录 platform.openai.com、chatgpt.com 和 muse.ai。我授权你新建隧道、受限 API Key（仅 Tunnels 读取 + 使用，30 天）和 ChatGPT 插件，在我的 Muse VM 上安装连接器，并批准本流程自己的审批卡。全程不要问我；只有需要登录、验证码或付款时才停下。最后按步骤报告 PASS/BLOCKED。
-
-## Safety
-
-- Only objects with this run's unique names are created or touched; your existing tunnels, keys, plugins and VM services are left alone. Approval cards that are not this setup's are left for you.
-- Tunnel IDs are not secret; the key is. It never appears in chat text, URLs, command lines, logs or screenshots, and page reads are limited to the elements a step needs, with tokens redacted.
-- After a VM swap a Muse hook (`~/hooks/scripts/muse-chatgpt-keepalive.sh`, every 60 s) runs `restore.sh`; it wakes the Muse agent only when a restart fails. While the VM is asleep nothing runs, so ChatGPT calls wait until Muse wakes it.
-- On the VM the key lives in `~/muse-chatgpt/run/control-plane.env` (`0600`), loaded by systemd `EnvironmentFile=` or by the start script - never on a command line.
-
-## Measured results
-
-_To be filled in after the phase-2 runs on real accounts (time per step, both key modes)._
-
-## Tests (offline)
+macOS/Linux controller:
 
 ```bash
-bash tests/test-install.sh            # install.sh with a mock tunnel-client (background-process mode)
-python3 tests/test-mcp.py             # muse-mcp.py protocol
-node tests/browser/test-browser.mjs   # the browser script against local fixture pages in a throwaway headless Chrome
+S="<skill-dir>/scripts/browser/host-connect.mjs"
+node "$S" browser-discover --browser-user-data-dir "<selected-user-data-dir>"
+node "$S" run --target local --host-name work-host --state "<private-dir>/state.json" --cdp <verified-CDP-URL> --allow-control
 ```
 
-## Repository layout
+Windows PowerShell controller:
 
-```
-skills/muse-chatgpt-setup/
-├── SKILL.md                     runbook for the agent
-├── references/muse-bootstrap.md messages for the Muse agent (install, restart, rotate, logs, diagnosis)
-└── scripts/
-    ├── install.sh               runs on the Muse VM: install / restore / rotate key / stop
-    ├── muse-mcp.py              minimal MCP server (stdlib only)
-    └── browser/                 muse-setup.mjs + CDP driver + bilingual UI labels
-tests/                           offline tests and fixtures
+```powershell
+$S = Join-Path '<skill-dir>' 'scripts/browser/host-connect.mjs'
+node $S run --target local --host-name work-host --state '<private-dir>/state.json' --cdp <verified-CDP-URL> --allow-control
 ```
 
-## License
+For SSH use the owner's configured alias; add `--target-os windows` for a native Windows remote host. Controller and target OS are independent. Linux linger requires authorized `--enable-linger`. Default `--host-mode script` does all six steps; explicit agent mode means the same AI adapts the host, not a handoff.
 
-MIT
+## Workflow and safeguards
+
+`tunnel → key → host-install → host-wait → plugin → test`
+
+- Separate private state, install directory, identity, free loopback ports and owned services per installation. No repointing old connections.
+- POSIX 0700/0600; Windows current-user DACL. Keys travel in private files/stdin, never argv/chat/attachments. The Windows backend uses no login password or SYSTEM task.
+- Target-side proxy discovery or an explicit HTTP(S) proxy. Never copy the controller's localhost proxy to a remote host; no TLS verification bypass.
+- Start with one full run, not a source audit/dry run. Technical failure yields `SAME_AI_RECOVERY`: the same AI diagnoses, repairs within authorization and resumes the original state, rather than asking the user to finish routine setup. Individual actions stay bounded; no blind retries or duplicate objects. Genuine login/permission prerequisites and proven external blockers are reported.
+- A two-second animation-frame check detects frozen rendering. Only a brand-new, unsubmitted entry tab may move to one fresh window in the same selected profile; saved forms/tasks stay put. No CSS changes or browser restarts.
+- Blank pages are page-load failures, with at most one safe entry-page retry; resource 401/403 is not blindly refreshed. Key recovery reuses the owned form rather than clicking a background button.
+- One Platform tab, one ChatGPT tab. Plugin creation waits and connects on its original page; no API/list round trips.
+- Acceptance approval directly clicks **Allow once** for the selected app in the original task tab. No routine View details or JSON review; no Always allow. Dispatch is not success: an unchanged approval control is reported within five seconds, not blindly clicked again.
+- One ChatGPT task / one shell call verifies identity and writes/reads one marker. The controller independently matches the file and successful command hash. Finish without waiting for model prose.
+- 90-second phase budgets; timeout recovery checks the same evidence, not a new task. Readiness alone is not success.
+
+Read [SKILL.md](skills/chatgpt-host-connect/SKILL.md) for authorization, ownership and recovery; [host-bootstrap.md](skills/chatgpt-host-connect/references/host-bootstrap.md) for service locations and failure diagnosis.
+
+## Offline tests
+
+```text
+python tests/test-mcp.py
+python tests/test-portability.py
+node tests/browser/test-portability.mjs
+node tests/browser/test-browser.mjs
+```
+
+On macOS/Linux additionally run `python3 tests/test-host.py`. Node browser tests require a local Chrome executable (`CHROME` can override); they create a temporary isolated headless profile, never touch the user's browser or use production accounts. Windows Job/ACL checks run natively only on Windows. Service lifecycle calls are mocked; the native Task Scheduler XML test validates in memory without registering a task.
+
+[CI](.github/workflows/test.yml) defines macOS/Linux/Windows offline jobs. Adding CI is not evidence that it has run, and offline tests do not establish pristine-machine or real ChatGPT end-to-end reliability. Report each separately.
+
+The skill and CLI are now `chatgpt-host-connect` and `host-connect.mjs`. For compatibility, the existing default state directory `~/.chatgpt-host-setup/`, host ownership marker and installed service names are unchanged. To resume a pre-rename direct-host installation, pass its original `--state` explicitly; do not recreate it. This download does not migrate or restart installed hosts.
+
+Legacy Muse states are refused, not migrated. Existing connections and runtime keys are not automatically removed. Redaction is best-effort, not access isolation; only grant control to trusted accounts/workspaces.

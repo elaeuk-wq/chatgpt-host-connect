@@ -87,7 +87,7 @@ class HostTests(unittest.TestCase):
             self.assertEqual(h.status(c)['control_plane'],'PENDING')
     def test_install_reinstall_status_and_evidence(self):
         key='sk-good-'+'a'*30
-        q=dict(name='test',tunnel_id='tunnel_'+'a'*32,key=key,manager='launchd',allow_control=True,control_plane_proxy='http://proxy.example:18080',probe_source=(SRC/'host-mcp.py').read_text())
+        q=dict(name='test',tunnel_id='tunnel_'+'a'*32,key=key,manager='launchd',allow_control=True,control_plane_proxy='http://proxy.example:18080',probe_source='import faulthandler; faulthandler.dump_traceback_later(10)\n'+(SRC/'host-mcp.py').read_text())
         with patch.object(h.platform,'system',return_value='Darwin'),patch.object(h,'manager_preflight'),patch.object(h,'client_binary',return_value=str(MOCK)),patch.object(h,'stop',side_effect=self.stop_children),patch.object(h,'start_component',side_effect=self.start):
             try:
                 result=h.install(q)

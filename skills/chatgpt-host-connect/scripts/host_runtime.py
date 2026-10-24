@@ -12,7 +12,8 @@ import time
 
 def powershell(script, timeout=30):
     exe = str(Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32/WindowsPowerShell/v1.0/powershell.exe')
-    script = "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); " + script
+    # A pwsh parent may export Core-only modules; prefer this engine's built-ins.
+    script = "$env:PSModulePath=$PSHOME+'\\Modules;'+$env:PSModulePath; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); " + script
     return subprocess.run([exe, '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
                            base64.b64encode(script.encode('utf-16le')).decode()],
                           capture_output=True, text=True, encoding='utf-8', timeout=timeout)
@@ -164,7 +165,7 @@ def bounded_process(argv, cwd, timeout, limit, env=None):
 def shell_argv(command):
     if os.name == 'nt':
         exe = str(Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32/WindowsPowerShell/v1.0/powershell.exe')
-        script = "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $OutputEncoding=[Console]::OutputEncoding; " + command
+        script = "$env:PSModulePath=$PSHOME+'\\Modules;'+$env:PSModulePath; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $OutputEncoding=[Console]::OutputEncoding; " + command
         return [exe, '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
                 base64.b64encode(script.encode('utf-16le')).decode()]
     return ['/bin/bash', '-c', command]

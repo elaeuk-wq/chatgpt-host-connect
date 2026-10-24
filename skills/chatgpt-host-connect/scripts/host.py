@@ -160,7 +160,7 @@ def windows_task_xml(c, component):
     pythonw = python.with_name('pythonw.exe')
     exe = str(pythonw if pythonw.is_file() else python)
     args = subprocess.list2cmdline([str(Path(c['root']) / 'host.py'), '--serve', component])
-    return ('''<?xml version="1.0" encoding="UTF-8"?>
+    return ('''<?xml version="1.0"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
 <RegistrationInfo><Description>{owner}</Description></RegistrationInfo>
 <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{sid}</UserId></LogonTrigger></Triggers>

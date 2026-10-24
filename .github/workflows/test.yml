@@ -21,7 +21,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      # Linux runner's packaged Chrome has a usable OS sandbox/AppArmor profile.
+      # Do not disable the browser sandbox for a downloaded Chromium snapshot.
       - uses: browser-actions/setup-chrome@v1
+        if: runner.os != 'Linux'
         id: chrome
       - name: Python MCP contracts
         run: python tests/test-mcp.py
@@ -45,5 +48,5 @@ jobs:
         run: node tests/browser/test-portability.mjs
       - name: Isolated browser workflow (no production accounts)
         env:
-          CHROME: ${{ steps.chrome.outputs.chrome-path }}
+          CHROME: ${{ runner.os == 'Linux' && '/usr/bin/google-chrome' || steps.chrome.outputs.chrome-path }}
         run: node tests/browser/test-browser.mjs

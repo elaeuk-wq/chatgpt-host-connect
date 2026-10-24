@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 
 export const psQuote = value => "'" + String(value).replaceAll("'", "''") + "'";
 export const powershellPath = () => path.win32.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-export const psArgs = script => ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
+export const psArgs = script => ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from("$env:PSModulePath=$PSHOME+'\\Modules;'+$env:PSModulePath; " + script, 'utf16le').toString('base64')];
 const ps = script => spawnSync(powershellPath(), psArgs("$ErrorActionPreference='Stop'; " + script), { encoding:'utf8', timeout:30000, windowsHide:true });
 const protectedDirs = new Set();
 export function privateDir(dir) {

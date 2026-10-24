@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -88,7 +89,7 @@ def test(control):
             if not WINDOWS:
                 r=payload(call('execute_terminal',command='exec 1>&- 2>&-; sleep 10',timeout=1))
                 check('timeout even after pipes close',r['timed_out'])
-            r=payload(call('execute_terminal',command="[Console]::Write('x' * 300000)" if WINDOWS else 'yes x | head -c 300000'))
+            r=payload(call('execute_terminal',command="[Console]::Write('x' * 300000)" if WINDOWS else shlex.quote(sys.executable)+' -c '+shlex.quote("print('x'*300000,end='')")))
             check('output bounded',r['truncated'] and len(r['stdout'])<=131072)
             check('negative offset rejected',call('read_file',filename=file,offset=-1)['isError'])
         finally:

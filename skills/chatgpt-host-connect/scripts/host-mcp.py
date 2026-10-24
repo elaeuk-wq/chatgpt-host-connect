@@ -35,7 +35,7 @@ def now():
 def redact(text):
     text = re.sub(r'\bsk-[A-Za-z0-9_-]{16,}', '[REDACTED]', str(text))
     text = re.sub(r'-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----', '[REDACTED PRIVATE KEY]', text)
-    return re.sub(r'(?i)((?:[\w-]*(?:api[_-]?key|token|secret|password)[\w-]*)\s*[=:]\s*)[^\s,;]+', r'\1[REDACTED]', text)
+    return re.sub(r'(?i)(?<![\w-])((?:[\w-]*(?:api[_-]?key|token|secret|password)[\w-]*)\s*[=:]\s*)[^\s,;]+', r'\1[REDACTED]', text)
 
 
 def log(text):

@@ -46,6 +46,11 @@ jobs:
           }
       - name: Node path, discovery and transport contracts
         run: node tests/browser/test-portability.mjs
+      - name: Linux browser availability
+        if: runner.os == 'Linux'
+        run: |
+          ls -l /usr/bin/google-chrome /opt/google/chrome/chrome
+          timeout 10 /usr/bin/google-chrome --version
       - name: Isolated browser workflow (no production accounts)
         env:
           CHROME: ${{ runner.os == 'Linux' && '/usr/bin/google-chrome' || steps.chrome.outputs.chrome-path }}

@@ -17,6 +17,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 
 NAME = 'chatgpt-host-control'
 VERSION = '2.0.0'
@@ -213,8 +214,16 @@ class Handler(BaseHTTPRequestHandler):
         pass  # Never log caller paths, commands, credentials or file contents.
 
 
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # A loopback-only listener does not need reverse DNS; resolver outages
+        # must not block startup inside HTTPServer.server_bind/getfqdn.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def main():
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    server = LoopbackHTTPServer((HOST, PORT), Handler)
     server.daemon_threads = True
     log('%s listening on loopback port %s control=%s' % (NAME, PORT, CONTROL))
     server.serve_forever()

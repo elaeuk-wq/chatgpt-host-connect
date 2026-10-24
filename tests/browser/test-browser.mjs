@@ -39,7 +39,8 @@ const CDP = await freePort();
 const fixture = spawn(process.execPath, [path.join(HERE, 'fixture-server.mjs'), String(FX)], { stdio: ['ignore', 'pipe', 'inherit'] });
 const profile = fs.mkdtempSync(path.join(WORK, 'chrome-profile-'));
 let chromeDiagnostic = '';
-const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${CDP}`, `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--window-size=1400,1000', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${CDP}`, `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--window-size=1400,1000', 'about:blank'], { stdio: ['ignore', 'pipe', 'pipe'] });
+chrome.stdout.on('data', chunk => { chromeDiagnostic = (chromeDiagnostic + chunk).slice(-5000); });
 chrome.stderr.on('data', chunk => { chromeDiagnostic = (chromeDiagnostic + chunk).slice(-5000); });
 chrome.on('error', err => { chromeDiagnostic += String(err); });
 const cleanup = () => {
@@ -53,11 +54,11 @@ const FXURL = `http://127.0.0.1:${FX}`;
 const api = async (p, body) => (await fetch(`${FXURL}/api/${p}`, { method: body ? 'POST' : 'GET', headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })).json();
 let browserReady = false;
 for (let i = 0; i < 60; i++) {
-  if (chrome.exitCode !== null) break;
+  if (chrome.exitCode !== null || chrome.signalCode !== null) break;
   try { await fetch(`http://127.0.0.1:${CDP}/json/version`); await api('config'); browserReady = true; break; }
   catch { await sleep(250); }
 }
-if (!browserReady) throw new Error(`Isolated Chrome did not start (exit ${chrome.exitCode}): ${chromeDiagnostic}`);
+if (!browserReady) throw new Error(`Isolated Chrome did not start (exit ${chrome.exitCode}, signal ${chrome.signalCode}, executable ${CHROME}): ${chromeDiagnostic}`);
 
 let ALL_OUT = '';
 function cli(stateFile, ...args) {

@@ -32,6 +32,13 @@ class Portability(unittest.TestCase):
         return dict(owner=h.OWNER, name='sample', root=str(self.root), manager='windows-task',
                     python_path=sys.executable, windows_sid='S-1-5-21-1-2-3-1000',
                     host_id='test-host', tunnel_id='tunnel_'+'a'*32, mcp_port=1, health_port=2)
+    def test_loopback_listener_needs_no_reverse_dns(self):
+        spec=importlib.util.spec_from_file_location('host_mcp',SRC/'host-mcp.py')
+        mcp=importlib.util.module_from_spec(spec);spec.loader.exec_module(mcp)
+        with patch('socket.getfqdn',side_effect=AssertionError('Unexpected reverse DNS')):
+            with mcp.LoopbackHTTPServer(('127.0.0.1',0),mcp.Handler) as server:
+                self.assertEqual(server.server_name,'127.0.0.1')
+                self.assertGreater(server.server_port,0)
     def test_managers_are_explicit(self):
         for os_name, manager in [('Darwin','launchd'),('Linux','systemd-user'),('Windows','windows-task')]:
             with patch.object(h.platform,'system',return_value=os_name):

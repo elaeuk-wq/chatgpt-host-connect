@@ -20,6 +20,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 
 if "--version" in sys.argv or "-v" in sys.argv:
     print("0.0.0-mock")
@@ -88,7 +89,13 @@ class H(BaseHTTPRequestHandler):
         pass
 
 
-srv = ThreadingHTTPServer((host, int(port)), H)
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+srv = LoopbackHTTPServer((host, int(port)), H)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
 log("INFO", "tunnel client started", tunnel_id=tunnel_id,

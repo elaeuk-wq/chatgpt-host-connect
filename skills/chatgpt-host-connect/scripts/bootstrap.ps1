@@ -31,7 +31,7 @@ function Prepare-HostPython([bool]$AllowInstall) {
     if (!$AllowInstall) { throw 'Python 3.9+ is missing on the target; install first with authorized setup.' }
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if (!$winget) { throw 'Python 3.9+ and winget are missing. Install Python from python.org (current user), then resume.' }
-    & $winget.Source install --id Python.Python.3.13 --exact --source winget --scope user --silent --disable-interactivity --accept-package-agreements --accept-source-agreements 1>&2
+    & $winget.Source install --id Python.Python.3.13 --exact --source winget --scope user --silent --disable-interactivity --accept-package-agreements --accept-source-agreements | ForEach-Object { [Console]::Error.WriteLine($_) }
     if ($LASTEXITCODE -ne 0) { throw 'Python installation failed. Check Windows package-manager policy/network; do not bypass admin approval.' }
     $python = Find-HostPython
     if (!$python) { throw 'Installed Python was not found; open a new terminal and resume.' }
